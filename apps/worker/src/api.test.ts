@@ -373,7 +373,7 @@ describe("FlareMo Worker API", () => {
     expect(health).toMatchObject({
       ok: true,
       product: "FlareMo",
-      version: "0.4.2",
+      version: "0.4.3",
       update_repository: "example/flaremo",
       update_workflow_url:
         "https://github.com/example/flaremo/actions/workflows/flaremo-update.yml",
@@ -390,6 +390,30 @@ describe("FlareMo Worker API", () => {
     expect(health).toMatchObject({
       update_repository: null,
       update_workflow_url: null,
+    });
+  });
+
+  it("returns JSON authentication errors for protected metadata endpoints", async () => {
+    const health = await fetchApp(
+      "http://flaremo.test/api/app/health",
+      undefined,
+      { authenticated: false },
+    );
+    expect(health.status).toBe(401);
+    expect(health.headers.get("content-type")).toContain("application/json");
+    expect(await health.json()).toEqual({
+      error: { message: "Authentication required" },
+    });
+
+    const openapi = await fetchApp(
+      "http://flaremo.test/api/v1/openapi.json",
+      undefined,
+      { authenticated: false },
+    );
+    expect(openapi.status).toBe(401);
+    expect(openapi.headers.get("content-type")).toContain("application/json");
+    expect(await openapi.json()).toEqual({
+      error: { message: "Authentication required" },
     });
   });
 
