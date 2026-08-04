@@ -39,7 +39,7 @@ export function FlareMoLogo({
           labelClassName,
         )}
       >
-        FlareMo
+        XilerMo
       </span>
     </div>
   );

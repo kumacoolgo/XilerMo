@@ -6,7 +6,7 @@ FlareMo 部署到 Cloudflare Workers。Worker 同时承载前端静态资源和 
 
 点击按钮会让 Cloudflare 从当前仓库创建一份新仓库，读取 `wrangler.jsonc`，自动创建需要的 D1 和 R2 资源，并配置 Workers Builds。把 `FLAREMO_DEPLOY_REPOSITORY` 填成这个新仓库的 `owner/repository`，应用内的系统更新入口就能打开对应 workflow。
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
 
 公开入口的实测记录见 [deploy-button-test.md](./deploy-button-test.md)。
 

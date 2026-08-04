@@ -1,4 +1,4 @@
-# FlareMo
+# XilerMo
 
 **一个免费账号就能 24 小时跑在云端的个人笔记系统。Cloudflare 原生部署，自带数据库和对象存储，应用层使用 Better Auth 原生登录，对外保留 Memos 兼容 API；Cloudflare Access 可以作为可选外层防线。**
 
@@ -9,7 +9,7 @@
 
 [English](./README.en.md)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
 
 <p>
   <img src="./docs/assets/flaremo-desktop.png" alt="FlareMo desktop timeline" width="720">

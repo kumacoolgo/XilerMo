@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "FlareMo",
-  "short_name": "FlareMo",
+  "name": "XilerMo",
+  "short_name": "XilerMo",
   "description": "A private, Cloudflare-native personal knowledge base.",
   "lang": "zh-CN",
   "start_url": "/",

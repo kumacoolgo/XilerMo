@@ -1,4 +1,4 @@
-# FlareMo
+# XilerMo
 
 **A Cloudflare-native personal knowledge system that can run all day on a free Cloudflare account. It ships with D1, R2, Better Auth native authentication, an optional Cloudflare Access outer layer, a quiet memo timeline, and a Memos-compatible API subset.**
 
@@ -9,7 +9,7 @@
 
 [中文 README](./README.md)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
 
 <p>
   <img src="./docs/assets/flaremo-desktop.png" alt="FlareMo desktop timeline" width="720">

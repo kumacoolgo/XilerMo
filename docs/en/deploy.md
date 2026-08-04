@@ -4,7 +4,7 @@ FlareMo deploys to Cloudflare Workers. The same Worker serves the web UI and API
 
 ## Deploy to Cloudflare
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
 
 Cloudflare reads `wrangler.jsonc`, creates the Worker, and provisions the D1 and R2 bindings.
 

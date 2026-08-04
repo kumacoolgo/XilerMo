@@ -42,7 +42,10 @@
         "description": "Owner display name used by the single-user runtime model."
       },
       "FLAREMO_DEPLOY_REPOSITORY": {
-        "description": "GitHub repository created for this deployment, in owner/repository form. FlareMo uses it only to link the owner to the repository's update workflow."
+        "description": "GitHub repository created for this deployment, in owner/repository form. XilerMo uses it only to link the owner to the repository's update workflow."
+      },
+      "FLAREMO_PUBLIC_URL": {
+        "description": "Canonical HTTPS origin for this deployment, for example https://xilermo.example.com. It must exactly match the URL used in the browser."
       }
     }
   },

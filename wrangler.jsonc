@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "flaremo",
+  "name": "xilermo",
   "main": "./apps/worker/src/index.ts",
   "compatibility_date": "2026-07-10",
   "compatibility_flags": ["nodejs_compat"],
@@ -17,7 +17,7 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "flaremo",
+      "database_name": "xilermo",
       "database_id": "5a5094d8-efcc-4aef-909b-c8455358247d",
       "migrations_dir": "./migrations"
     }
@@ -25,7 +25,7 @@
   "r2_buckets": [
     {
       "binding": "ATTACHMENTS",
-      "bucket_name": "flaremo-attachments"
+      "bucket_name": "xilermo-attachments"
     }
   ],
   "triggers": {
@@ -34,10 +34,10 @@
   "vars": {
     "FLAREMO_DEPLOY_REPOSITORY": "",
     "FLAREMO_SINGLE_USER_EMAIL": "owner@flaremo.local",
-    "FLAREMO_SINGLE_USER_NAME": "FlareMo Owner",
+    "FLAREMO_SINGLE_USER_NAME": "XilerMo Owner",
     // Canonical origin used by Better Auth for callback and cookie checks.
     // Set this to the deployed origin; keep secrets out of this file.
-    "FLAREMO_PUBLIC_URL": "https://flaremo.chendahuang.com",
+    "FLAREMO_PUBLIC_URL": "https://xilermo.example.com",
     // Optional comma-separated additional browser origins for trusted clients.
     "FLAREMO_TRUSTED_ORIGINS": ""
   }

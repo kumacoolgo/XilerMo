@@ -13,7 +13,7 @@ const LOCALE_STORAGE_KEY = "flaremo.locale";
 
 const messages = {
   "zh-CN": {
-    "app.name": "FlareMo",
+    "app.name": "XilerMo",
     "common.search": "搜索",
     "search.placeholder": "搜索记录…",
     "search.results": "搜索结果",
@@ -107,10 +107,10 @@ const messages = {
     "detail.revokeShare": "撤销分享",
     "toast.accessRequired": "登录状态已失效，请重新登录",
     "auth.sessionSecurity":
-      "登录状态仅保存在安全的 HttpOnly Cookie 中，FlareMo 不会将会话令牌保存到本地存储。",
+      "登录状态仅保存在安全的 HttpOnly Cookie 中，XilerMo 不会将会话令牌保存到本地存储。",
     "auth.nativeAccess": "原生访问",
-    "auth.loginTitle": "登录 FlareMo",
-    "auth.loginDescription": "使用你的 FlareMo 用户名和密码继续。",
+    "auth.loginTitle": "登录 XilerMo",
+    "auth.loginDescription": "使用你的 XilerMo 用户名和密码继续。",
     "auth.username": "用户名",
     "auth.password": "密码",
     "auth.signIn": "登录",
@@ -126,7 +126,7 @@ const messages = {
       "此页面只在实例尚未初始化时可用，完成后将永久关闭。",
     "auth.bootstrapSecret": "初始化密钥",
     "auth.setupSecretNotice":
-      "初始化密钥只用于本次请求，不会保存到浏览器或 FlareMo 数据库。请从安全渠道获取它。",
+      "初始化密钥只用于本次请求，不会保存到浏览器或 XilerMo 数据库。请从安全渠道获取它。",
     "auth.displayName": "显示名称",
     "auth.email": "邮箱",
     "auth.confirmPassword": "确认密码",
@@ -220,7 +220,7 @@ const messages = {
     "update.guide": "升级指南",
   },
   "en-US": {
-    "app.name": "FlareMo",
+    "app.name": "XilerMo",
     "common.search": "Search",
     "search.placeholder": "Search notes…",
     "search.results": "Search results",
@@ -315,11 +315,11 @@ const messages = {
     "detail.revokeShare": "Revoke share",
     "toast.accessRequired": "Your sign-in has expired. Please sign in again.",
     "auth.sessionSecurity":
-      "Your session is held only in a secure HttpOnly cookie. FlareMo never stores session tokens in local storage.",
+      "Your session is held only in a secure HttpOnly cookie. XilerMo never stores session tokens in local storage.",
     "auth.nativeAccess": "Native access",
-    "auth.loginTitle": "Sign in to FlareMo",
+    "auth.loginTitle": "Sign in to XilerMo",
     "auth.loginDescription":
-      "Continue with your FlareMo username and password.",
+      "Continue with your XilerMo username and password.",
     "auth.username": "Username",
     "auth.password": "Password",
     "auth.signIn": "Sign in",
@@ -327,18 +327,18 @@ const messages = {
     "auth.loginFailed":
       "Sign-in failed. Check your username and password, then try again.",
     "auth.statusUnavailable":
-      "FlareMo could not read the current authentication status. Check your connection and try again.",
+      "XilerMo could not read the current authentication status. Check your connection and try again.",
     "auth.setupUnavailable":
       "Setup is unavailable. Confirm that an administrator has securely configured native authentication.",
     "auth.recoveryRequired":
-      "Setup requires administrator recovery. To avoid creating a second owner, FlareMo has safely closed setup.",
+      "Setup requires administrator recovery. To avoid creating a second owner, XilerMo has safely closed setup.",
     "auth.oneTimeSetup": "One-time setup",
     "auth.setupTitle": "Create the first workspace account",
     "auth.setupDescription":
       "This page is available only while the instance is uninitialized and permanently closes after setup.",
     "auth.bootstrapSecret": "Setup secret",
     "auth.setupSecretNotice":
-      "The setup secret is used only for this request. It is not saved in your browser or in FlareMo's database. Obtain it through a secure channel.",
+      "The setup secret is used only for this request. It is not saved in your browser or in XilerMo's database. Obtain it through a secure channel.",
     "auth.displayName": "Display name",
     "auth.email": "Email",
     "auth.confirmPassword": "Confirm password",
@@ -375,7 +375,7 @@ const messages = {
     "auth.copied": "Copied",
     "auth.hideToken": "Hide token",
     "auth.copyFailed":
-      "FlareMo could not copy the token. Save it securely by hand.",
+      "XilerMo could not copy the token. Save it securely by hand.",
     "auth.tokenName": "Token name",
     "auth.tokenNamePlaceholder": "For example: Memos Desktop",
     "auth.tokenExpiry": "Expires in days",
