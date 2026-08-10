@@ -8,6 +8,7 @@
 - `pnpm install` 已完成，或 Agent 可以执行它。
 - Wrangler 已登录目标 Cloudflare 账号。
 - `wrangler.jsonc` 里的 D1、R2 binding 指向目标资源。
+- `wrangler.jsonc` 的 Static Assets `run_worker_first` 必须覆盖 `/api/*`、`/file/*`、`/mcp`、`/openapi.json` 和 `/memos.api.v1.*`；否则 API、Memos Web 附件文件 URL 或 Connect/gRPC-Web 路径会被静态资源 fallback 接管，返回 SPA HTML 而不是进入 Worker。
 - `wrangler.jsonc` 的 `FLAREMO_PUBLIC_URL` 已设置为生产 canonical origin；需要时设置 `FLAREMO_TRUSTED_ORIGINS`。
 - `BETTER_AUTH_SECRET` 和 `FLAREMO_BOOTSTRAP_SECRET` 已通过 Wrangler secret 或 Cloudflare 控制台配置，且各至少 32 个字符。`FLAREMO_RECOVERY_SECRET` 只在明确批准的 break-glass recovery 窗口临时配置。Agent 不得要求用户把 secret、密码、cookie 或 PAT 粘贴到聊天中。
 - `FLAREMO_SINGLE_USER_EMAIL` 和 `FLAREMO_SINGLE_USER_NAME` 只是既有 `users/owner` domain metadata 的 legacy 公开变量；它们不是 Better Auth 登录身份、用户名、密码或 bootstrap 输入。初始认证身份以部署者在生产 `/setup` 页面提交的值为准。
@@ -102,7 +103,7 @@ curl "$FLAREMO_URL/api/v1/memos" \
 
 公开分享路径要单独验证 bypass policy，但分享内容仍必须由 FlareMo share token 控制。Access Service Token alone 不能访问私有 API。
 
-旧的 `/api/v1/mcp` 是 FlareMo 现有 JSON-RPC 子集；根 `/mcp` 现在提供 current Memos 风格的无状态 JSON Streamable HTTP MCP 子集。Agent 不得在发布记录中宣称已经完整兼容：完整 CEL、Connect/gRPC、SSE、comments/reactions/shortcuts，以及第三方客户端真实 smoke test 仍未完成。
+旧的 `/api/v1/mcp` 是 FlareMo 现有 JSON-RPC 子集；根 `/mcp` 现在提供 current Memos 风格的无状态 JSON Streamable HTTP MCP 子集。Agent 不得在发布记录中宣称已经完整兼容：完整 CEL、Connect/gRPC、SSE、comments/reactions/shortcuts 的完整上游 parity、完整上游 webhook 事件/egress 语义、完整 notification filter/多用户 ACL，以及第三方客户端真实 smoke test 仍未完成；有限 social、UserService webhook/notification 资源和四类 memo 事件的有界 outbox 投递/重试已经有本地 contract 覆盖。
 
 ## 常见失败
 

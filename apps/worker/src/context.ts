@@ -12,6 +12,7 @@ import {
   MEMOS_PAT_CONFIG_ID,
 } from "./auth";
 import type { FlareMoEnv } from "./env";
+import { authenticateMemosAccessToken } from "./memos-native-auth";
 
 export type HonoBindings = {
   Bindings: FlareMoEnv;
@@ -27,6 +28,23 @@ export async function getRequestContext(c: Context<HonoBindings>) {
   if (token) {
     assertTrustedBearerOrigin(c);
     if (!token.startsWith("memos_pat_")) {
+      const nativeAccess = await authenticateMemosAccessToken({
+        db,
+        env: c.env,
+        token,
+      });
+      if (nativeAccess) {
+        return {
+          db,
+          user: nativeAccess.user,
+          authUserId: nativeAccess.authUserId,
+          credential: "session" as const,
+          bearerSession: false,
+          nativeAccessToken: true,
+          session: null,
+        };
+      }
+
       const session = await getFlaremoUserByAuthSessionToken(db, token);
       if (!session) throw new UnauthorizedError();
 
@@ -36,6 +54,7 @@ export async function getRequestContext(c: Context<HonoBindings>) {
         authUserId: session.authUserId,
         credential: "session" as const,
         bearerSession: true,
+        nativeAccessToken: false,
         session: session.session,
       };
     }
@@ -61,11 +80,41 @@ export async function getRequestContext(c: Context<HonoBindings>) {
       authUserId: verification.key.referenceId,
       credential: "pat" as const,
       bearerSession: false,
+      nativeAccessToken: false,
       session: null,
     };
   }
 
   return getBrowserRequestContext(c, { auth, db });
+}
+
+/**
+ * Read-only Memos endpoints may serve an anonymous public view. Do not use
+ * the single-user owner as a fallback: that would make a missing credential
+ * equivalent to the owner's private session. Any explicit bearer credential
+ * remains fail-closed and is never downgraded to anonymous access.
+ */
+export async function getOptionalRequestContext(c: Context<HonoBindings>) {
+  try {
+    return await getRequestContext(c);
+  } catch (error) {
+    if (
+      error instanceof UnauthorizedError &&
+      !c.req.raw.headers.has("authorization") &&
+      !c.req.raw.headers.has("cookie")
+    ) {
+      return {
+        db: createDb(c.env.DB),
+        user: null,
+        authUserId: null,
+        credential: "anonymous" as const,
+        bearerSession: false,
+        nativeAccessToken: false,
+        session: null,
+      };
+    }
+    throw error;
+  }
 }
 
 export async function getBrowserRequestContext(
@@ -97,6 +146,7 @@ export async function getBrowserRequestContext(
     authUserId: session.user.id,
     credential: "session" as const,
     bearerSession: false,
+    nativeAccessToken: false,
     session: null,
   };
 }
@@ -107,6 +157,23 @@ export function assertTrustedCookieMutation(c: Context<HonoBindings>) {
   const origin = c.req.header("origin");
   if (!origin || !getTrustedOrigins(c.env).includes(origin)) {
     throw new ForbiddenError("This browser request must use FlareMo's origin.");
+  }
+}
+
+/**
+ * Validate the transport-level credential boundary before a public Connect
+ * method can short-circuit authentication. Public reads may omit credentials,
+ * but a supplied bearer or cookie must still obey the same exact-origin rule
+ * as authenticated private routes.
+ */
+export function assertRequestCredentialBoundary(c: Context<HonoBindings>) {
+  const token = getBearerToken(c.req.raw.headers);
+  if (token) {
+    assertTrustedBearerOrigin(c);
+    return;
+  }
+  if (c.req.raw.headers.has("cookie")) {
+    assertTrustedCookieMutation(c);
   }
 }
 
