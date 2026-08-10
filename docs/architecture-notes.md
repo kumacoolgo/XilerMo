@@ -86,7 +86,7 @@ Blinko 是功能参考，不是架构基底。
 
 - Bun/Node 后端。
 - Prisma + Postgres。
-- 过宽的应用模型：comments、follows、notifications、plugins、MCP servers、AI providers、conversations、scheduled tasks、fonts。
+- 过宽的全量应用模型：comments、follows、notifications、plugins、MCP servers、AI providers、conversations、scheduled tasks、fonts。
 - GPL-3.0 代码。
 
 ### MeowNocode
@@ -208,7 +208,7 @@ FlareMo 对外暴露 Memos-compatible `/api/v1`。公共兼容面包括：
 
 - 应用层由 Better Auth cookie session 或 `memos_pat_` PAT 负责认证。
 - 默认 `/api/v1` 使用 current camelCase/protobuf-JSON subset；旧 snake_case wire 通过 `X-FlareMo-Wire: legacy` 或 legacy vendor `Accept` 显式选择。
-- current auth facade 的 `accessToken` 是 opaque Better Auth session-backed token，不是 Memos 原生 JWT。
+- current auth facade 由 Better Auth 提供身份事实源，并返回 Memos 风格 HS256 access JWT；`memos_refresh` 是 HttpOnly、轮换并可撤销的 refresh cookie。旧 opaque Better Auth session bearer 仍保留兼容。
 - Cloudflare Access 是可选的外层 policy；启用时脚本和工具要同时携带 Access Service Token 与 FlareMo PAT。
 - 常见分页参数：`page_size`、`page_token`。
 - 常见排序参数：`order_by`。
@@ -236,12 +236,12 @@ Authorization: Bearer <memos_pat_...>
 - 为 FlareMo 暴露的 `/api/v1` 维护 OpenAPI 文档。
 - 基于 OpenAPI 暴露 MCP endpoint。
 - 响应字段在支持范围内保持 Memos-compatible。
-- Webhooks 作为自动化生态能力进入整体设计。
-- current camelCase wire、Better Auth-backed auth facade、字段/错误翻译、PAT 资源和根 `/mcp` 无状态 Streamable HTTP MCP 子集已实现并有仓库测试；`accessToken` 是 opaque session-backed token，不是 Memos 原生 JWT。
+- UserService webhook 资源的 CRUD/signing-secret 已进入兼容层；四类 memo 事件已有 D1 outbox 的有界异步投递/重试，完整上游事件语义、egress SSRF 防护和完整多用户 ACL 仍是未完成边界。
+- current camelCase wire、Better Auth-backed identity、native JWT/refresh facade、字段/错误翻译、PAT/social 资源、UserService webhook/notification 资源子集、Connect JSON/protobuf/gRPC-Web unary subset、heartbeat SSE 和根 `/mcp` 无状态 Streamable HTTP MCP 子集已实现并有仓库测试；这些仍不等于完整 Memos Server、原生 HTTP/2 gRPC 或第三方客户端 parity。
 
 ### 兼容边界
 
-FlareMo 兼容 Memos 生态，不复制 Memos 服务端历史包袱。完整 Connect/gRPC、复杂 CEL filter、instance settings、SSO、notifications、comments、reactions、shortcuts、admin surfaces、SSE、有状态 MCP session 和第三方客户端实测仍未完成；这些能力只有在它们确实服务 FlareMo 产品目标时才进入实现，不为了追求字面 parity 复制复杂度。
+FlareMo 兼容 Memos 生态，不复制 Memos 服务端历史包袱。comments、reactions、shortcuts 和 UserService webhook/notification 已有有限实现，四类 memo 事件已有有界 outbox 投递/重试，但完整 Connect/gRPC、复杂 CEL filter、instance settings、SSO、完整上游 social/notification service 语义、完整 webhook 事件/egress 语义、完整多用户 ACL、admin surfaces、SSE、有状态 MCP session 和第三方客户端实测仍未完成；这些能力只有在它们确实服务 FlareMo 产品目标时才进入实现，不为了追求字面 parity 复制复杂度。
 
 ## API 分层
 

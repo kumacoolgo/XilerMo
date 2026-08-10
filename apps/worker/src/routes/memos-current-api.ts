@@ -9,16 +9,18 @@ import {
   getAttachmentById,
   getAuthUserById,
   getFlaremoUserByAuthSessionToken,
-  getMemoById,
+  getFlaremoUserById,
+  type getMemoById,
+  getMemoByIdForViewer,
   getMemosPersonalAccessToken,
   getPublicShareByToken,
   hardDeleteMemo,
   listAttachments,
-  listAttachmentsForMemos,
-  listMemoAttachments,
-  listMemoRelations,
+  listAttachmentsForMemosForViewer,
+  listMemoAttachmentsForViewer,
+  listMemoRelationsForViewer,
   listMemoShares,
-  listMemos,
+  listMemosForViewer,
   listMemosPersonalAccessTokens,
   markAttachmentDeleting,
   moveMemoToTrash,
@@ -44,9 +46,19 @@ import {
 import { createFlareMoAuth } from "../auth";
 import {
   assertTrustedCookieMutation,
+  getOptionalRequestContext,
   getRequestContext,
   type HonoBindings,
 } from "../context";
+import {
+  authenticateMemosAccessToken,
+  clearMemosRefreshCookie,
+  getMemosRefreshToken,
+  issueMemosNativeTokens,
+  type MemosNativeRefreshResult,
+  revokeMemosRefreshToken,
+  rotateMemosRefreshToken,
+} from "../memos-native-auth";
 
 export const memosCurrentApi = new Hono<HonoBindings>();
 
@@ -187,6 +199,13 @@ memosCurrentApi.post("/auth/signin", async (c, next) => {
         "Better Auth returned a session that could not be resolved",
       );
     }
+    const nativeTokens = await issueMemosNativeTokens({
+      db: dbContext.db,
+      env: c.env,
+      authUserId: session.authUserId,
+      user: session.user,
+      request: c.req.raw,
+    });
     const response = c.json(
       {
         user: await currentUserForContext({
@@ -194,12 +213,13 @@ memosCurrentApi.post("/auth/signin", async (c, next) => {
           user: session.user,
           authUserId: session.authUserId,
         }),
-        accessToken: result.response.token,
-        accessTokenExpiresAt: session.session.expiresAt.toISOString(),
+        accessToken: nativeTokens.accessToken,
+        accessTokenExpiresAt: nativeTokens.accessTokenExpiresAt.toISOString(),
       },
       200,
     );
     copyHeaders(response.headers, result.headers);
+    response.headers.append("set-cookie", nativeTokens.refreshCookie);
     response.headers.set("cache-control", "no-store");
     return response;
   } catch (error) {
@@ -213,35 +233,73 @@ memosCurrentApi.post("/auth/refresh", async (c, next) => {
     const authorization = c.req.header("authorization");
     if (authorization) {
       const token = parseBearerToken(authorization);
-      const authContext = await getRequestContext(c);
-      // Resolve every bearer credential through the shared request context so
-      // session refresh gets the same expiry, PAT rejection, and exact
-      // trusted-Origin checks as the rest of the current API. A Memos PAT is
-      // an application credential, not a refreshable browser session.
-      if (!authContext.bearerSession || !authContext.session) {
+      const bearerContext = await getRequestContext(c);
+      const nativeAccess = await authenticateMemosAccessToken({
+        db: bearerContext.db,
+        env: c.env,
+        token,
+      });
+      if (nativeAccess) {
+        // A native refresh is cookie-authenticated. If a caller also sends a
+        // bearer token, it is only an optional user-binding check; the
+        // refresh token itself must still be present in memos_refresh.
+        if (c.req.raw.headers.get("cookie")) {
+          assertTrustedCookieMutation(c);
+        }
+        if (getMemosRefreshToken(c.req.raw.headers)) {
+          const rotated = await rotateMemosRefreshToken({
+            db: bearerContext.db,
+            env: c.env,
+            request: c.req.raw,
+            expectedAuthUserId: nativeAccess.authUserId,
+          });
+          if (!rotated) throw new UnauthorizedCurrentError();
+          return nativeRefreshResponse(c, rotated);
+        }
+
+        // Preserve the previous FlareMo session-bearer facade for clients
+        // that have not adopted the new refresh cookie yet. This compatibility
+        // response is not a refresh operation and cannot mint a new token.
+        const authContext = await createAuthContext(c);
+        const session = await authContext.auth.api.getSession({
+          headers: c.req.raw.headers,
+          query: { disableCookieCache: true },
+        });
+        if (!session || session.user.id !== nativeAccess.authUserId) {
+          throw new UnauthorizedCurrentError();
+        }
+        return noStoreResponse(
+          c.json({
+            accessToken: token,
+            expiresAt: new Date(
+              nativeAccess.claims.expiresAt * 1_000,
+            ).toISOString(),
+          }),
+        );
+      }
+
+      // Existing opaque Better Auth session bearers remain accepted here for
+      // compatibility. A Memos PAT is an application credential, not a
+      // refreshable browser session.
+      if (!bearerContext.bearerSession || !bearerContext.session) {
         throw new UnauthorizedCurrentError();
       }
       return noStoreResponse(
         c.json({
           accessToken: token,
-          expiresAt: authContext.session.expiresAt.toISOString(),
+          expiresAt: bearerContext.session.expiresAt.toISOString(),
         }),
       );
     }
 
-    if (!authorization) assertTrustedCookieMutation(c);
-    const authContext = await createAuthContext(c);
-    const result = await authContext.auth.api.getSession({
-      headers: c.req.raw.headers,
-      query: { disableCookieCache: true },
+    assertTrustedCookieMutation(c);
+    const rotated = await rotateMemosRefreshToken({
+      db: (await createAuthContext(c)).db,
+      env: c.env,
+      request: c.req.raw,
     });
-    if (!result) throw new UnauthorizedCurrentError();
-    return noStoreResponse(
-      c.json({
-        accessToken: result.session.token,
-        expiresAt: result.session.expiresAt.toISOString(),
-      }),
-    );
+    if (!rotated) throw new UnauthorizedCurrentError();
+    return nativeRefreshResponse(c, rotated);
   } catch (error) {
     return currentJsonError(c, error);
   }
@@ -253,25 +311,51 @@ memosCurrentApi.post("/auth/signout", async (c, next) => {
     const authorization = c.req.header("authorization");
     if (authorization) {
       const token = parseBearerToken(authorization);
-      if (token.startsWith("memos_pat_")) {
-        // A PAT does not have a browser session to clear, but it still must be
-        // valid. Do not return success for arbitrary bearer strings.
-        const context = await getRequestContext(c);
-        if (c.req.raw.headers.get("cookie")) {
-          return signOutCookieSession(c, context.db);
+      const context = await getRequestContext(c);
+      const hasCookie = Boolean(c.req.raw.headers.get("cookie"));
+      if (hasCookie) assertTrustedCookieMutation(c);
+
+      if (context.nativeAccessToken) {
+        await revokeMemosRefreshToken({
+          db: context.db,
+          env: c.env,
+          headers: c.req.raw.headers,
+          expectedAuthUserId: context.authUserId,
+        });
+        if (hasCookie) {
+          const response = await signOutCookieSession(c, context.db);
+          return appendMemosRefreshClearCookie(response, c.req.raw);
+        }
+        return appendMemosRefreshClearCookie(c.body(null, 200), c.req.raw);
+      }
+
+      if (context.credential === "pat") {
+        // A PAT does not have a browser session to revoke, but it still must
+        // be valid. Do not return success for arbitrary bearer strings.
+        if (hasCookie) {
+          const response = await signOutCookieSession(c, context.db);
+          return appendMemosRefreshClearCookie(response, c.req.raw);
         }
         return c.body(null, 200);
       }
-      const context = await getRequestContext(c);
+
       await revokeAuthSessionByToken(context.db, token);
-      if (c.req.raw.headers.get("cookie")) {
-        return signOutCookieSession(c, context.db);
+      if (hasCookie) {
+        const response = await signOutCookieSession(c, context.db);
+        return appendMemosRefreshClearCookie(response, c.req.raw);
       }
       return c.body(null, 200);
     }
 
     const context = await getRequestContext(c);
-    return signOutCookieSession(c, context.db);
+    await revokeMemosRefreshToken({
+      db: context.db,
+      env: c.env,
+      headers: c.req.raw.headers,
+      expectedAuthUserId: context.authUserId,
+    });
+    const response = await signOutCookieSession(c, context.db);
+    return appendMemosRefreshClearCookie(response, c.req.raw);
   } catch (error) {
     return currentJsonError(c, error);
   }
@@ -280,13 +364,13 @@ memosCurrentApi.post("/auth/signout", async (c, next) => {
 memosCurrentApi.get("/memos", async (c, next) => {
   if (isLegacyWireRequest(c)) return next();
   try {
-    const context = await getRequestContext(c);
-    const result = await listMemos(
+    const context = await getOptionalRequestContext(c);
+    const result = await listMemosForViewer(
       context.db,
       context.user,
       currentListQuery(c),
     );
-    const attachments = await listAttachmentsForMemos(
+    const attachments = await listAttachmentsForMemosForViewer(
       context.db,
       context.user,
       result.memos.map((memo) => memo.id),
@@ -299,10 +383,12 @@ memosCurrentApi.get("/memos", async (c, next) => {
       byMemo.set(attachment.memoId, values);
     }
     return c.json({
-      memos: result.memos.map((memo) =>
-        currentMemoToDto(memo, context.user, {
-          attachments: byMemo.get(memo.id) ?? [],
-        }),
+      memos: await Promise.all(
+        result.memos.map(async (memo) =>
+          currentMemoToDto(memo, await currentMemoCreator(context, memo), {
+            attachments: byMemo.get(memo.id) ?? [],
+          }),
+        ),
       ),
       ...(result.nextPageToken ? { nextPageToken: result.nextPageToken } : {}),
     });
@@ -341,8 +427,8 @@ memosCurrentApi.post("/memos", async (c, next) => {
 memosCurrentApi.get("/memos/:memo", async (c, next) => {
   if (isLegacyWireRequest(c)) return next();
   try {
-    const context = await getRequestContext(c);
-    const memo = await getMemoById(
+    const context = await getOptionalRequestContext(c);
+    const memo = await getMemoByIdForViewer(
       context.db,
       context.user,
       normalizeMemoName(c.req.param("memo")),
@@ -395,8 +481,8 @@ memosCurrentApi.delete("/memos/:memo", async (c, next) => {
 memosCurrentApi.get("/memos/:memo/attachments", async (c, next) => {
   if (isLegacyWireRequest(c)) return next();
   try {
-    const context = await getRequestContext(c);
-    const attachments = await listMemoAttachments(
+    const context = await getOptionalRequestContext(c);
+    const attachments = await listMemoAttachmentsForViewer(
       context.db,
       context.user,
       normalizeMemoName(c.req.param("memo")),
@@ -432,7 +518,7 @@ memosCurrentApi.patch("/memos/:memo/attachments", async (c, next) => {
 memosCurrentApi.get("/memos/:memo/relations", async (c, next) => {
   if (isLegacyWireRequest(c)) return next();
   try {
-    const context = await getRequestContext(c);
+    const context = await getOptionalRequestContext(c);
     const relations = await currentRelations(
       context,
       normalizeMemoName(c.req.param("memo")),
@@ -795,33 +881,45 @@ memosCurrentApi.get("/users/:user", async (c, next) => {
 });
 
 async function currentMemoWithDetails(
-  context: Awaited<ReturnType<typeof getRequestContext>>,
+  context: Awaited<ReturnType<typeof getOptionalRequestContext>>,
   memo: Awaited<ReturnType<typeof getMemoById>>,
 ) {
   const [attachments, relations] = await Promise.all([
-    listMemoAttachments(context.db, context.user, memo.id),
+    listMemoAttachmentsForViewer(context.db, context.user, memo.id),
     currentRelations(context, memo.id),
   ]);
-  return currentMemoToDto(memo, context.user, { attachments, relations });
+  return currentMemoToDto(memo, await currentMemoCreator(context, memo), {
+    attachments,
+    relations,
+  });
 }
 
 async function currentRelations(
-  context: Awaited<ReturnType<typeof getRequestContext>>,
+  context: Awaited<ReturnType<typeof getOptionalRequestContext>>,
   memoId: string,
 ) {
-  const memo = await getMemoById(context.db, context.user, memoId, {
+  await getMemoByIdForViewer(context.db, context.user, memoId, {
     includeDeleted: true,
   });
-  const rows = await listMemoRelations(context.db, context.user, memoId);
+  const rows = await listMemoRelationsForViewer(
+    context.db,
+    context.user,
+    memoId,
+  );
   const related = await Promise.all(
     rows.map(async (relation) => {
       try {
-        const relatedMemo = await getMemoById(
-          context.db,
-          context.user,
-          relation.relatedMemoId,
-          { includeDeleted: true },
-        );
+        const [memo, relatedMemo] = await Promise.all([
+          getMemoByIdForViewer(context.db, context.user, relation.memoId, {
+            includeDeleted: true,
+          }),
+          getMemoByIdForViewer(
+            context.db,
+            context.user,
+            relation.relatedMemoId,
+            { includeDeleted: true },
+          ),
+        ]);
         return currentRelationToDto(relation, memo, relatedMemo);
       } catch {
         return null;
@@ -831,6 +929,15 @@ async function currentRelations(
   return related.filter(
     (value): value is NonNullable<typeof value> => value !== null,
   );
+}
+async function currentMemoCreator(
+  context: Awaited<ReturnType<typeof getOptionalRequestContext>>,
+  memo: Awaited<ReturnType<typeof getMemoById>>,
+) {
+  if (context.user?.id === memo.userId) return context.user;
+  const creator = await getFlaremoUserById(context.db, memo.userId);
+  if (!creator) throw new Error("Memo creator not found");
+  return creator;
 }
 
 async function currentUserForContext(context: {
@@ -877,58 +984,13 @@ function currentListQuery(c: Parameters<typeof getRequestContext>[0]) {
     page_token: c.req.query("pageToken"),
     order_by: orderBy,
     ...(state ? { state } : {}),
-    ...(filter.q ? { q: filter.q } : {}),
-    ...(filter.tag ? { tag: filter.tag } : {}),
-    ...(filter.visibility ? { visibility: filter.visibility } : {}),
+    ...(filter.expression ? { filter: filter.expression } : {}),
     include_deleted: c.req.query("showDeleted") === "true",
   };
 }
 
 function parseCurrentFilter(filter: string | undefined) {
-  if (!filter?.trim()) return {};
-  const result: {
-    q?: string;
-    tag?: string;
-    visibility?: "private" | "protected" | "public";
-  } = {};
-  const terms: string[] = [];
-  for (const clause of filter.split(/\s*&&\s*/)) {
-    const content = clause.match(/^content\.contains\((['"])(.*?)\1\)$/);
-    if (content?.[2]) {
-      terms.push(content[2]);
-      continue;
-    }
-    const tag = clause.match(
-      /^tags\.exists\(\s*\w+\s*,\s*\w+\s*==\s*(['"])(.*?)\1\s*\)$/,
-    );
-    if (tag?.[2]) {
-      result.tag = tag[2];
-      continue;
-    }
-    const pinned = clause.match(/^pinned\s*==\s*(true|false)$/);
-    if (pinned?.[1] === "true") {
-      terms.push("is:pinned");
-      continue;
-    }
-    if (pinned?.[1] === "false") {
-      throw new ValidationCurrentError(
-        "The current filter subset only supports pinned == true",
-      );
-    }
-    const visibility = clause.match(
-      /^visibility\s*==\s*(['"])(PRIVATE|PROTECTED|PUBLIC)\1$/,
-    );
-    if (visibility?.[2]) {
-      result.visibility = visibility[2].toLowerCase() as
-        | "private"
-        | "protected"
-        | "public";
-      continue;
-    }
-    throw new ValidationCurrentError(`Unsupported Memos filter: ${clause}`);
-  }
-  if (terms.length > 0) result.q = terms.join(" ");
-  return result;
+  return filter?.trim() ? { expression: filter.trim() } : {};
 }
 
 function currentPayload(body: z.infer<typeof currentMemoBodySchema>) {
@@ -1185,17 +1247,36 @@ function noStoreResponse(response: Response) {
   return response;
 }
 
-function signOutCookieSession(
+function nativeRefreshResponse(
+  c: Parameters<typeof getRequestContext>[0],
+  result: MemosNativeRefreshResult,
+) {
+  const response = noStoreResponse(
+    c.json({
+      accessToken: result.accessToken,
+      expiresAt: result.accessTokenExpiresAt.toISOString(),
+    }),
+  );
+  response.headers.append("set-cookie", result.refreshCookie);
+  return response;
+}
+
+function appendMemosRefreshClearCookie(response: Response, request: Request) {
+  response.headers.append("set-cookie", clearMemosRefreshCookie(request));
+  return response;
+}
+
+async function signOutCookieSession(
   c: Parameters<typeof getRequestContext>[0],
   db: ReturnType<typeof createDb>,
-) {
+): Promise<Response> {
   const headers = new Headers(c.req.raw.headers);
   headers.delete("authorization");
   const request = new Request(new URL("/api/auth/sign-out", c.req.url), {
     method: "POST",
     headers,
   });
-  return createFlareMoAuth(c.env, db).handler(request);
+  return await createFlareMoAuth(c.env, db).handler(request);
 }
 
 function currentJsonError(
@@ -1217,6 +1298,7 @@ function currentJsonError(
 function currentErrorStatus(error: unknown) {
   if (error instanceof CurrentHttpError) return error.status;
   if (isDomainError(error)) return error.status;
+  if (isBetterAuthCredentialError(error)) return 400;
   if (isRecord(error) && typeof error.statusCode === "number")
     return error.statusCode;
   if (isRecord(error) && typeof error.status === "number") return error.status;
@@ -1234,6 +1316,8 @@ function currentErrorStatus(error: unknown) {
 function currentErrorMessage(error: unknown) {
   if (error instanceof CurrentHttpError) return error.message;
   if (isDomainError(error)) return error.message;
+  if (isBetterAuthCredentialError(error))
+    return "unmatched username and password";
   if (isRecord(error) && typeof error.message === "string")
     return error.message;
   if (isRecord(error) && Array.isArray(error.issues)) {
@@ -1246,6 +1330,10 @@ function currentErrorMessage(error: unknown) {
       .join("; ");
   }
   return "Internal server error";
+}
+
+function isBetterAuthCredentialError(error: unknown) {
+  return isRecord(error) && error.code === "INVALID_USERNAME_OR_PASSWORD";
 }
 
 function currentErrorCode(status: number) {

@@ -8,6 +8,7 @@ This runbook is for Codex, Claude Code, Cursor Agent, and other command-capable 
 - `pnpm install` has completed, or the agent can run it.
 - Wrangler is logged in to the target Cloudflare account.
 - `wrangler.jsonc` points to the target D1 and R2 resources.
+- `wrangler.jsonc` Static Assets `run_worker_first` covers `/api/*`, `/file/*`, `/mcp`, `/openapi.json`, and `/memos.api.v1.*`; otherwise API, Memos Web attachment URLs, or Connect/gRPC-Web requests can be handled by the SPA fallback instead of the Worker.
 - Application authentication is handled by Better Auth. Cloudflare Access is optional outer policy and does not replace a FlareMo cookie session or `memos_pat_` PAT.
 - `BETTER_AUTH_SECRET` and `FLAREMO_BOOTSTRAP_SECRET` are configured as Wrangler secrets. `FLAREMO_RECOVERY_SECRET` is optional and must only be configured for an approved break-glass recovery window, then rotated or removed.
 
@@ -54,7 +55,7 @@ curl "$FLAREMO_URL/api/v1/memos" \
 
 Public share routes need a separate Access bypass policy. The content must still be protected by FlareMo share tokens.
 
-The default `/api/v1` wire is the current camelCase/protobuf-JSON subset. `X-FlareMo-Wire: legacy` selects the older snake_case wire. The root `/mcp` endpoint is a stateless Streamable HTTP MCP subset; it is not a claim of complete Memos Server parity. The auth facade's `accessToken` is an opaque Better Auth session-backed token, not a native Memos JWT.
+The default `/api/v1` wire is the current camelCase/protobuf-JSON subset. `X-FlareMo-Wire: legacy` selects the older snake_case wire. Better Auth remains the identity source while the auth facade issues a Memos-style HS256 access JWT and rotates the `memos_refresh` HttpOnly cookie. The current release also exposes bounded social REST resources, a UserService webhook/notification resource subset, a bounded D1 outbox for four memo webhook events with retries, a Connect JSON/protobuf/gRPC-Web unary subset, and an authenticated heartbeat SSE stream. The root `/mcp` endpoint is a stateless Streamable HTTP subset; complete upstream webhook event/egress semantics, full notification filtering and multi-user ACL, complete upstream social semantics, and complete Memos Server, protobuf/gRPC, or third-party-client parity are not claimed.
 
 ## Common Failures
 

@@ -235,6 +235,31 @@ export const memos = sqliteTable(
   ],
 );
 
+// D1 is shared by independent Worker isolates, so the Memos SSE stream needs
+// a durable event cursor rather than an in-memory broadcaster. Event rows are
+// deliberately not foreign-keyed to a memo: delete events must remain
+// replayable after the resource itself has been removed.
+export const memosSseEvents = sqliteTable(
+  "memos_sse_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    type: text("type").notNull(),
+    name: text("name").notNull(),
+    parent: text("parent"),
+    visibility: text("visibility", {
+      enum: ["private", "protected", "public"],
+    }).notNull(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("memos_sse_events_created_id_idx").on(table.createdAt, table.id),
+    index("memos_sse_events_creator_id_idx").on(table.creatorId, table.id),
+  ],
+);
+
 export const memoTags = sqliteTable(
   "memo_tags",
   {
@@ -303,6 +328,206 @@ export const memoRelations = sqliteTable(
       table.relatedMemoId,
       table.type,
       table.memoId,
+    ),
+  ],
+);
+
+// Memos reactions are first-class resources. `content_id` stores the memo
+// resource name (`memos/...`) so the compatibility layer can reconstruct the
+// upstream reaction resource name without introducing a second memo model.
+export const reactions = sqliteTable(
+  "reactions",
+  {
+    id: text("id").primaryKey(),
+    creatorId: text("creator_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    contentId: text("content_id")
+      .notNull()
+      .references(() => memos.id, { onDelete: "cascade" }),
+    reactionType: text("reaction_type").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("reactions_creator_content_type_idx").on(
+      table.creatorId,
+      table.contentId,
+      table.reactionType,
+    ),
+    index("reactions_content_created_id_idx").on(
+      table.contentId,
+      table.createdAt,
+      table.id,
+    ),
+    index("reactions_creator_idx").on(table.creatorId),
+  ],
+);
+
+// Shortcuts are stored as rows rather than encoded in the generic settings
+// JSON. This preserves stable resource names and gives future multi-user
+// deployments an ownership boundary that is independent of auth storage.
+export const shortcuts = sqliteTable(
+  "shortcuts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    filter: text("filter").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("shortcuts_user_created_id_idx").on(
+      table.userId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+// Webhooks are first-class resources rather than a JSON setting. The secret
+// is deliberately kept out of every public DTO; only the dedicated signing
+// secret RPC may reveal it.
+export const memosWebhooks = sqliteTable(
+  "memos_webhooks",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    displayName: text("display_name").notNull().default(""),
+    signingSecret: text("signing_secret").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("memos_webhooks_user_created_id_idx").on(
+      table.userId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
+);
+
+// Webhook events are durable outbox rows. The body is a memo snapshot so
+// delete events remain deliverable after the source memo is removed. Secrets
+// and destination URLs stay in the webhook/delivery tables, never in the
+// event payload.
+export const memosWebhookEvents = sqliteTable(
+  "memos_webhook_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    receiverId: text("receiver_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    activityType: text("activity_type").notNull(),
+    body: text("body", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    createdAt: text("created_at").notNull(),
+    expandedAt: text("expanded_at"),
+  },
+  (table) => [
+    index("memos_webhook_events_receiver_created_idx").on(
+      table.receiverId,
+      table.createdAt,
+    ),
+    index("memos_webhook_events_expanded_created_idx").on(
+      table.expandedAt,
+      table.createdAt,
+    ),
+  ],
+);
+
+// One delivery row per event/webhook makes retries independent. `sending`
+// rows carry a lease so a crashed Worker isolate can be reclaimed later.
+export const memosWebhookDeliveries = sqliteTable(
+  "memos_webhook_deliveries",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => memosWebhookEvents.id, { onDelete: "cascade" }),
+    webhookId: text("webhook_id")
+      .notNull()
+      .references(() => memosWebhooks.id, { onDelete: "cascade" }),
+    status: text("status", {
+      enum: ["pending", "sending", "delivered", "dead"],
+    })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at").notNull(),
+    leaseUntil: text("lease_until"),
+    deliveredAt: text("delivered_at"),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("memos_webhook_deliveries_event_webhook_idx").on(
+      table.eventId,
+      table.webhookId,
+    ),
+    index("memos_webhook_deliveries_claim_idx").on(
+      table.status,
+      table.nextAttemptAt,
+      table.leaseUntil,
+    ),
+    index("memos_webhook_deliveries_event_idx").on(table.eventId),
+  ],
+);
+
+// Notifications are inbox rows, not a denormalized user setting. Keeping the
+// memo references and snippets here lets list/update/delete stay bounded and
+// makes a comment notification idempotent for a given recipient/type pair.
+export const memosNotifications = sqliteTable(
+  "memos_notifications",
+  {
+    // Upstream resource names use the inbox row's numeric ID. Keeping that
+    // stable shape avoids clients treating the final path segment as opaque.
+    id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
+    receiverId: text("receiver_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    senderId: text("sender_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type", { enum: ["memo_comment", "memo_mention"] }).notNull(),
+    status: text("status", { enum: ["unread", "archived"] })
+      .notNull()
+      .default("unread"),
+    // A source event, rather than memo_id alone, is the idempotency boundary.
+    // This permits a later re-mention after a user was removed from a memo's
+    // content while still collapsing retries of the same mutation.
+    sourceEventId: text("source_event_id").notNull(),
+    memoId: text("memo_id")
+      .notNull()
+      .references(() => memos.id, { onDelete: "cascade" }),
+    relatedMemoId: text("related_memo_id").references(() => memos.id, {
+      onDelete: "cascade",
+    }),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("memos_notifications_receiver_source_type_idx").on(
+      table.receiverId,
+      table.sourceEventId,
+      table.type,
+    ),
+    index("memos_notifications_receiver_created_id_idx").on(
+      table.receiverId,
+      table.createdAt,
+      table.id,
+    ),
+    index("memos_notifications_receiver_status_created_idx").on(
+      table.receiverId,
+      table.status,
+      table.createdAt,
     ),
   ],
 );
@@ -413,7 +638,15 @@ export type AuthApiKeyRow = typeof authApiKeys.$inferSelect;
 export type AuthBootstrapRow = typeof authBootstrap.$inferSelect;
 export type MemoRow = typeof memos.$inferSelect;
 export type NewMemoRow = typeof memos.$inferInsert;
+export type MemosSseEventRow = typeof memosSseEvents.$inferSelect;
 export type MemoTagRow = typeof memoTags.$inferSelect;
 export type MemoRevisionRow = typeof memoRevisions.$inferSelect;
+export type ReactionRow = typeof reactions.$inferSelect;
+export type ShortcutRow = typeof shortcuts.$inferSelect;
+export type MemosWebhookRow = typeof memosWebhooks.$inferSelect;
+export type MemosWebhookEventRow = typeof memosWebhookEvents.$inferSelect;
+export type MemosWebhookDeliveryRow =
+  typeof memosWebhookDeliveries.$inferSelect;
+export type MemosNotificationRow = typeof memosNotifications.$inferSelect;
 export type AttachmentRow = typeof attachments.$inferSelect;
 export type ShareRow = typeof shares.$inferSelect;

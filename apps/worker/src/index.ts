@@ -4,6 +4,7 @@ import {
 } from "@flaremo/contracts";
 import { createDb } from "@flaremo/db";
 import {
+  dispatchMemosWebhookOutbox,
   finalizeAttachmentCleanup,
   listAttachmentCleanupCandidates,
 } from "@flaremo/domain";
@@ -22,10 +23,14 @@ import { appApi } from "./routes/app-api";
 import { authApi } from "./routes/auth-api";
 import { mcpApi, mcpStreamableApi } from "./routes/mcp";
 import { memosApi } from "./routes/memos-api";
+import { memosConnectApi } from "./routes/memos-connect-api";
 import {
   isLegacyWireRequest,
   memosCurrentApi,
 } from "./routes/memos-current-api";
+import { memosFileApi } from "./routes/memos-file-api";
+import { memosSocialApi } from "./routes/memos-social-api";
+import { memosSseApi } from "./routes/memos-sse";
 import { publicApi } from "./routes/public-api";
 
 const app = new Hono<HonoBindings>();
@@ -71,6 +76,33 @@ app.use(
   }),
 );
 
+app.use(
+  "/memos.api.v1.*",
+  cors({
+    origin: (origin, c) => {
+      try {
+        return getTrustedOrigins(c.env).includes(origin) ? origin : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    credentials: true,
+    allowHeaders: [
+      "content-type",
+      "authorization",
+      "accept",
+      "connect-protocol-version",
+      "grpc-accept-encoding",
+      "grpc-encoding",
+      "grpc-timeout",
+      "x-grpc-web",
+      "x-user-agent",
+    ],
+    exposeHeaders: ["grpc-status", "grpc-message", "grpc-status-details-bin"],
+    allowMethods: ["POST", "OPTIONS"],
+  }),
+);
+
 // Better Auth's own handler also mutates the browser session. Keep its
 // endpoints under the same exact-origin contract as the application routes;
 // the handler's trustedOrigins setting is not a substitute for requiring an
@@ -89,7 +121,11 @@ app.all("/api/auth/*", (c) => createFlareMoAuth(c.env).handler(c.req.raw));
 app.route("/api/app/account", accountApi);
 app.route("/api/app", appApi);
 app.route("/api/public", publicApi);
+app.route("/file", memosFileApi);
 app.route("/mcp", mcpStreamableApi);
+app.route("/", memosConnectApi);
+app.route("/", memosSseApi);
+app.route("/api/v1", memosSocialApi);
 app.route("/api/v1", memosCurrentApi);
 app.route("/api/v1", memosApi);
 app.route("/api/v1", mcpApi);
@@ -122,9 +158,15 @@ app.notFound((c) => {
 });
 
 const handler = {
-  fetch: (request: Request, env: FlareMoEnv, ctx: ExecutionContext) =>
-    app.fetch(request, env, ctx),
+  async fetch(request: Request, env: FlareMoEnv, ctx?: ExecutionContext) {
+    const response = await app.fetch(request, env, ctx);
+    ctx?.waitUntil(
+      dispatchMemosWebhookOutbox(createDb(env.DB)).catch(() => undefined),
+    );
+    return response;
+  },
   async scheduled(controller: ScheduledController, env: FlareMoEnv) {
+    await dispatchMemosWebhookOutbox(createDb(env.DB));
     const db = createDb(env.DB);
     const cutoff = new Date(
       controller.scheduledTime - 24 * 60 * 60 * 1_000,
