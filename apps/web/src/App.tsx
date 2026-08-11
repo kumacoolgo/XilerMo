@@ -42,16 +42,21 @@ import { toast } from "sonner";
 import {
   ApiError,
   AUTHENTICATION_REQUIRED_EVENT,
+  createExportTask,
+  createImportTask,
   createMemo,
   createShare,
-  exportData,
+  deleteTag,
+  downloadExportJson,
+  getDataTask,
   getMemoStats,
+  getTagHierarchy,
   hardDeleteMemo,
-  importData,
   listMemos,
   type Memo,
   type MemoState,
   type MemoStatsResponse,
+  renameTag,
   type Share,
   trashMemo,
   updateMemo,
@@ -126,6 +131,7 @@ function FlareMoApp() {
   const search = indexRoute.useSearch();
   const view = search.view ?? "all";
   const activeTag = search.tag;
+  const untagged = Boolean(search.untagged);
   const query = search.q ?? "";
   const setView = (nextView: ViewMode) =>
     void navigate({
@@ -135,7 +141,16 @@ function FlareMoApp() {
   const setActiveTag = (tag: string | undefined) =>
     void navigate({
       replace: true,
-      search: (current) => ({ ...current, tag }),
+      search: (current) => ({ ...current, tag, untagged: undefined }),
+    });
+  const setUntagged = (next: boolean) =>
+    void navigate({
+      replace: true,
+      search: (current) => ({
+        ...current,
+        tag: undefined,
+        untagged: next ? true : undefined,
+      }),
     });
   const setQuery = (q: string) =>
     void navigate({
@@ -207,7 +222,7 @@ function FlareMoApp() {
   }, []);
 
   const memosQuery = useInfiniteQuery({
-    queryKey: ["memos", view, debouncedQuery, activeTag],
+    queryKey: ["memos", view, debouncedQuery, activeTag, untagged],
     initialPageParam: undefined as string | undefined,
     queryFn: ({ pageParam }) =>
       listMemos({
@@ -217,6 +232,7 @@ function FlareMoApp() {
         q: debouncedQuery || undefined,
         state: isSearching ? undefined : viewToMemoState(view),
         tag: activeTag,
+        untagged,
       }),
     getNextPageParam: (lastPage) => lastPage.next_page_token,
     retry: false,
@@ -224,6 +240,11 @@ function FlareMoApp() {
   const statsQuery = useQuery({
     queryKey: ["memo-stats", timeZone],
     queryFn: () => getMemoStats(timeZone),
+    retry: false,
+  });
+  const tagHierarchyQuery = useQuery({
+    queryKey: ["tag-hierarchy"],
+    queryFn: () => getTagHierarchy(),
     retry: false,
   });
 
@@ -244,6 +265,7 @@ function FlareMoApp() {
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ["memos"] }),
       queryClient.invalidateQueries({ queryKey: ["memo-stats"] }),
+      queryClient.invalidateQueries({ queryKey: ["tag-hierarchy"] }),
     ]);
   const handleMutationError = (error: unknown) => {
     const normalizedError = toError(error);
@@ -282,6 +304,25 @@ function FlareMoApp() {
       restoreMemoSnapshot(queryClient, snapshot);
       handleMutationError(error);
     },
+    onSettled: () => void invalidateWorkspace(),
+  });
+
+  const renameTagMutation = useMutation({
+    mutationFn: renameTag,
+    onError: (error) => {
+      handleMutationError(error);
+      toast.error(t("explorer.tagRenameFailed"));
+    },
+    onSettled: () => void invalidateWorkspace(),
+  });
+
+  const deleteTagMutation = useMutation({
+    mutationFn: deleteTag,
+    onError: (error) => {
+      handleMutationError(error);
+      toast.error(t("explorer.tagDeleteFailed"));
+    },
+    onSuccess: () => toast.success(t("explorer.tagDeleted")),
     onSettled: () => void invalidateWorkspace(),
   });
 
@@ -337,15 +378,6 @@ function FlareMoApp() {
     onSuccess: (share) => {
       setSharesByMemo((current) => new Map(current).set(share.memo, share));
       toast.success(t("toast.shareCreated"));
-    },
-    onError: handleMutationError,
-  });
-
-  const importMutation = useMutation({
-    mutationFn: importData,
-    onSuccess: (result) => {
-      toast.success(t("toast.imported", { count: result.imported_memos }));
-      void invalidateWorkspace();
     },
     onError: handleMutationError,
   });
@@ -453,18 +485,59 @@ function FlareMoApp() {
 
   const handleExport = async () => {
     try {
-      const bundle = await exportData();
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], {
-        type: "application/json",
-      });
+      const { task } = await createExportTask();
+      toast.success(t("toast.exportStarted"));
+      const finished = await pollDataTask(task.id);
+      if (finished.status !== "succeeded") {
+        toast.error(
+          t("toast.exportFailed", {
+            message: finished.error_message ?? finished.status,
+          }),
+        );
+        return;
+      }
+      const blob = await downloadExportJson(finished.id);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = `flaremo-export-${new Date().toISOString()}.json`;
       anchor.click();
       URL.revokeObjectURL(url);
+      toast.success(t("toast.exportDone"));
     } catch (error) {
       handleMutationError(error);
+    }
+  };
+
+  const handleImportFile = async (bundle: unknown) => {
+    try {
+      const { task, result } = await createImportTask({ bundle });
+      if (task.status !== "succeeded") {
+        toast.error(
+          t("toast.importFailed", {
+            message: task.error_message ?? task.status,
+          }),
+        );
+        return;
+      }
+      toast.success(t("toast.importDone", { count: result.imported_memos }));
+      void invalidateWorkspace();
+    } catch (error) {
+      handleMutationError(error);
+    }
+  };
+
+  const pollDataTask = async (id: string) => {
+    for (;;) {
+      const { task } = await getDataTask(id);
+      if (
+        task.status === "succeeded" ||
+        task.status === "failed" ||
+        task.status === "expired"
+      ) {
+        return task;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   };
 
@@ -527,7 +600,7 @@ function FlareMoApp() {
                   if (!file) return;
                   try {
                     const text = await file.text();
-                    importMutation.mutate(JSON.parse(text) as unknown);
+                    void handleImportFile(JSON.parse(text) as unknown);
                   } catch {
                     toast.error(t("toast.invalidImport"));
                   }
@@ -538,7 +611,12 @@ function FlareMoApp() {
         </div>
       }
       stats={stats}
+      hierarchy={tagHierarchyQuery.data?.tags ?? []}
+      untagged={untagged}
+      onDeleteTag={(tag) => deleteTagMutation.mutate(tag)}
+      onRenameTag={(from, to) => renameTagMutation.mutate({ from, to })}
       onTagChange={setActiveTag}
+      onUntaggedChange={setUntagged}
       onViewChange={setView}
     />
   );
@@ -908,6 +986,8 @@ const indexRoute = createRoute({
     view: isViewMode(search.view) ? search.view : undefined,
     q: typeof search.q === "string" && search.q ? search.q : undefined,
     tag: typeof search.tag === "string" && search.tag ? search.tag : undefined,
+    untagged:
+      search.untagged === true || search.untagged === "true" ? true : undefined,
   }),
 });
 
