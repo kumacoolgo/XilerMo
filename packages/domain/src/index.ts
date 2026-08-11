@@ -1,5 +1,6 @@
 export * from "./attachments";
 export * from "./auth";
+export * from "./data-tasks";
 export * from "./errors";
 export * from "./ids";
 export * from "./import-export";
@@ -14,4 +15,5 @@ export * from "./relations";
 export * from "./revisions";
 export * from "./settings";
 export * from "./shares";
+export * from "./tags";
 export * from "./users";
