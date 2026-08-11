@@ -1,6 +1,10 @@
 import type {
   AttachmentDto,
   CreateMemoInput,
+  DataTaskDto,
+  DataTaskListResponse,
+  DeleteTagResponse,
+  ExportManifest,
   ImportResult,
   ListMemosResponse,
   MemoContextResponse,
@@ -9,7 +13,9 @@ import type {
   MemoStatsResponse,
   MemoVisibility,
   PublicShareDto,
+  RenameTagResponse,
   ShareDto,
+  TagHierarchyResponse,
   UpdateMemoInput,
 } from "@flaremo/contracts";
 
@@ -19,6 +25,7 @@ export type MemoPayload = MemoDto["payload"];
 export type Share = ShareDto;
 export type PublicShare = PublicShareDto;
 export type MemoContext = MemoContextResponse;
+export type TagHierarchyNode = TagHierarchyResponse["tags"][number];
 export type { MemoState, MemoStatsResponse, MemoVisibility };
 
 export type CreateMemoRequest = CreateMemoInput;
@@ -28,6 +35,7 @@ export type ListMemoParams = {
   state?: MemoState;
   q?: string;
   tag?: string;
+  untagged?: boolean;
   include_deleted?: boolean;
   page_size?: number;
   page_token?: string;
@@ -95,10 +103,29 @@ export async function listMemos(params: ListMemoParams = {}) {
   if (params.state) query.set("state", params.state);
   if (params.q) query.set("q", params.q);
   if (params.tag) query.set("tag", params.tag);
+  if (params.untagged) query.set("untagged", "true");
   if (params.include_deleted) query.set("include_deleted", "true");
   if (params.page_token) query.set("page_token", params.page_token);
 
   return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`);
+}
+
+export async function getTagHierarchy() {
+  return apiRequest<TagHierarchyResponse>("/api/app/tags");
+}
+
+export async function renameTag(input: { from: string; to: string }) {
+  return apiRequest<RenameTagResponse>("/api/app/tags", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteTag(tag: string) {
+  return apiRequest<DeleteTagResponse>(
+    `/api/app/tags?tag=${encodeURIComponent(tag)}`,
+    { method: "DELETE" },
+  );
 }
 
 export async function getMemoStats(timeZone: string) {
@@ -336,6 +363,58 @@ export async function importData(bundle: unknown) {
     method: "POST",
     body: JSON.stringify(bundle),
   });
+}
+
+export async function createExportTask() {
+  return apiRequest<{ task: DataTaskDto }>("/api/v1/export/tasks", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function listDataTasks() {
+  return apiRequest<DataTaskListResponse>("/api/v1/export/tasks");
+}
+
+export async function getDataTask(id: string) {
+  return apiRequest<{ task: DataTaskDto }>(
+    `/api/v1/export/tasks/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function createImportTask(input: {
+  bundle: unknown;
+  conflict?: "skip" | "duplicate" | "overwrite";
+}) {
+  return apiRequest<{ task: DataTaskDto; result: ImportResult }>(
+    "/api/v1/import/tasks",
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function downloadExportManifest(id: string) {
+  return apiRequest<ExportManifest>(
+    `/api/v1/export/tasks/${encodeURIComponent(id)}/manifest`,
+  );
+}
+
+export function exportTaskDataUrl(id: string, chunk: string) {
+  return `/api/v1/export/tasks/${encodeURIComponent(id)}/data/${encodeURIComponent(chunk)}`;
+}
+
+export function exportTaskAttachmentUrl(id: string, attachmentId: string) {
+  return `/api/v1/export/tasks/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`;
+}
+
+export async function downloadExportJson(id: string) {
+  const response = await fetch(
+    `/api/v1/export/tasks/${encodeURIComponent(id)}/manifest`,
+    { credentials: "same-origin" },
+  );
+  if (!response.ok) {
+    throw new ApiError(response.statusText, response.status);
+  }
+  return response.blob();
 }
 
 async function apiRequest<T>(
