@@ -63,6 +63,23 @@ export type FlareMoAuth = {
     authUserId: string;
     newPassword: string;
   }) => Promise<void>;
+  /**
+   * Change a Better Auth identity's login email and mark it verified. The
+   * caller is responsible for prior password/identity verification and for
+   * keeping the FlareMo domain `users` row in sync.
+   */
+  changeEmail: (input: {
+    currentEmail: string;
+    newEmail: string;
+  }) => Promise<void>;
+  /**
+   * Mint a single-use, expiring password-reset token for a Better Auth
+   * identity. The token is stored in `auth_verifications` under the same
+   * `reset-password:` namespace Better Auth's reset-password endpoint already
+   * consumes, so the recipient sets their own password through the official
+   * flow without the admin ever learning the plaintext.
+   */
+  createPasswordResetToken: (authUserId: string) => Promise<string>;
   api: {
     createApiKey: (input: {
       body: {
@@ -115,6 +132,10 @@ export type FlareMoAuth = {
         enabled: boolean;
       };
     }) => Promise<MemosApiKey>;
+    verifyPassword: (input: {
+      body: { password: string };
+      headers: Headers;
+    }) => Promise<{ status: boolean }>;
     verifyApiKey: (input: {
       body: {
         configId: string;
@@ -204,6 +225,31 @@ export function createFlareMoAuth(
 
   return {
     ...auth,
+    createPasswordResetToken: async (authUserId: string) => {
+      // The token is the verification record's unique identifier under the
+      // `reset-password:` prefix Better Auth's reset-password endpoint looks
+      // up. Storing the auth user id as the value keeps the flow scoped to
+      // one identity and one attempt.
+      const authContext = await auth.$context;
+      const token = crypto.randomUUID();
+      const identifier = `reset-password:${token}`;
+      await authContext.internalAdapter.createVerificationValue({
+        identifier,
+        value: authUserId,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1_000),
+      });
+      return token;
+    },
+    changeEmail: async ({ currentEmail, newEmail }) => {
+      const authContext = await auth.$context;
+      // Better Auth lowercases the email and refreshes the caller's own
+      // session so subsequent requests observe the new login identity.
+      await authContext.internalAdapter.updateUserByEmail(currentEmail, {
+        email: newEmail,
+        emailVerified: true,
+        updatedAt: new Date(),
+      });
+    },
     operatorResetPassword: async ({ authUserId, newPassword }) => {
       // Better Auth's resetPassword API owns password validation, hashing,
       // verification consumption, reset callbacks, and session revocation.

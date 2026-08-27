@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  BrainIcon,
   ClipboardIcon,
   Link2Icon,
   Loader2Icon,
@@ -11,9 +12,12 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import type { RelatedMemo } from "@/api";
 import {
+  createMemoryFromMemo,
   createShare,
   getMemoContext,
+  getRelatedMemos,
   listMemos,
   replaceMemoRelations,
   restoreMemoRevision,
@@ -52,9 +56,15 @@ export function MemoDetailPage({ memoId }: { memoId: string }) {
     queryFn: () => listMemos({ q: relatedMemo.trim(), page_size: 8 }),
     enabled: relatedMemo.trim().length >= 2,
   });
+  const relatedQuery = useQuery({
+    queryKey: ["memo-related", memoId],
+    queryFn: () => getRelatedMemos(memoId),
+    retry: false,
+  });
   const invalidateMemo = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey }),
+      queryClient.invalidateQueries({ queryKey: ["memo-related", memoId] }),
       queryClient.invalidateQueries({ queryKey: ["memos"] }),
       queryClient.invalidateQueries({ queryKey: ["memo-stats"] }),
     ]);
@@ -114,6 +124,24 @@ export function MemoDetailPage({ memoId }: { memoId: string }) {
     onError: (error) => toast.error(toError(error).message),
   });
 
+  const rememberMutation = useMutation({
+    mutationFn: () =>
+      createMemoryFromMemo(contextQuery.data?.memo.name ?? memoId, {
+        type: "semantic",
+        kind: "fact",
+        scope_type: "global",
+        tier: "normal",
+        importance: 50,
+      }),
+    onSuccess: async (result) => {
+      toast.success(
+        result.duplicate ? t("toast.memoryConfirmed") : t("toast.saved"),
+      );
+      await queryClient.invalidateQueries({ queryKey });
+    },
+    onError: (error) => toast.error(toError(error).message),
+  });
+
   return (
     <div className="min-h-svh bg-background px-4 py-5 sm:py-8">
       <main className="mx-auto flex w-full max-w-3xl flex-col gap-4">
@@ -161,6 +189,7 @@ export function MemoDetailPage({ memoId }: { memoId: string }) {
             context={contextQuery.data}
             isSearching={relationCandidatesQuery.isFetching}
             locale={locale}
+            related={relatedQuery.data?.memos ?? []}
             relatedMemo={relatedMemo}
             setRelatedMemo={setRelatedMemo}
             onAddRelation={(name) => {
@@ -193,11 +222,13 @@ export function MemoDetailPage({ memoId }: { memoId: string }) {
               })
             }
             onRevoke={(share) => revokeMutation.mutate(share)}
+            onRemember={() => rememberMutation.mutate()}
             pending={
               relationMutation.isPending ||
               restoreMutation.isPending ||
               shareMutation.isPending ||
-              revokeMutation.isPending
+              revokeMutation.isPending ||
+              rememberMutation.isPending
             }
           />
         )}
@@ -211,10 +242,12 @@ function MemoDetail({
   context,
   isSearching,
   locale,
+  related,
   relatedMemo,
   setRelatedMemo,
   onAddRelation,
   onCreateShare,
+  onRemember,
   onRestore,
   onRemoveRelation,
   onRevoke,
@@ -224,10 +257,12 @@ function MemoDetail({
   context: Awaited<ReturnType<typeof getMemoContext>>;
   isSearching: boolean;
   locale: string;
+  related: RelatedMemo[];
   relatedMemo: string;
   setRelatedMemo: (value: string) => void;
   onAddRelation: (name: string) => void;
   onCreateShare: () => void;
+  onRemember: () => void;
   onRestore: (revision: string) => void;
   onRemoveRelation: (name: string) => void;
   onRevoke: (share: string) => void;
@@ -242,10 +277,19 @@ function MemoDetail({
             {formatMemoTime(context.memo.display_time, locale)}
           </CardTitle>
           <div className="flex flex-wrap gap-2">
-            {context.memo.pinned && <Badge>{t("memo.pin")}</Badge>}
+            {context.memo.pinned && <Badge>{t("memo.pinnedBadge")}</Badge>}
             <Badge variant="outline">
               {t(`visibility.${context.memo.visibility}`)}
             </Badge>
+            <Button
+              disabled={pending}
+              size="sm"
+              variant="ghost"
+              onClick={onRemember}
+            >
+              <BrainIcon data-icon="inline-start" />
+              {t("memory.newMemory")}
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -253,7 +297,12 @@ function MemoDetail({
         <Tabs defaultValue="content">
           <TabsList className="max-w-full overflow-x-auto">
             <TabsTrigger value="content">{t("detail.content")}</TabsTrigger>
-            <TabsTrigger value="relations">{t("detail.relations")}</TabsTrigger>
+            <TabsTrigger value="relations">
+              {t("detail.relations")}
+              {context.relations.length + context.backlinks.length > 0
+                ? ` (${context.relations.length + context.backlinks.length})`
+                : ""}
+            </TabsTrigger>
             <TabsTrigger value="history">{t("detail.history")}</TabsTrigger>
             <TabsTrigger value="sharing">{t("detail.sharing")}</TabsTrigger>
           </TabsList>
@@ -263,6 +312,77 @@ function MemoDetail({
               content={context.memo.content}
             />
             <AttachmentGallery attachments={context.attachments} />
+            {context.memories.length > 0 && (
+              <section className="flex flex-col gap-2 border-t border-border/60 pt-4">
+                <h2 className="text-sm font-medium">{t("memory.title")}</h2>
+                {context.memories.map((memory) => (
+                  <div
+                    className="rounded-lg border p-3 text-sm"
+                    key={memory.id}
+                  >
+                    <div className="whitespace-pre-wrap">{memory.content}</div>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      <Badge variant="outline">
+                        {t(`memory.type.${memory.type}`)}
+                      </Badge>
+                      <Badge variant="outline">
+                        {t(`memory.kind.${memory.kind}`)}
+                      </Badge>
+                      <Badge variant="flame">
+                        {t(`memory.verification.${memory.verification}`)}
+                      </Badge>
+                    </div>
+                  </div>
+                ))}
+              </section>
+            )}
+            {(context.relations.length > 0 || context.backlinks.length > 0) && (
+              <section className="flex flex-col gap-4 border-t border-border/60 pt-4">
+                {context.relations.length > 0 && (
+                  <RelationGroup
+                    label={t("detail.outgoing")}
+                    relations={context.relations}
+                  />
+                )}
+                {context.backlinks.length > 0 && (
+                  <RelationGroup
+                    label={t("detail.backlinks")}
+                    relations={context.backlinks}
+                  />
+                )}
+              </section>
+            )}
+            {related.length > 0 && (
+              <section className="flex flex-col gap-2 border-t border-border/60 pt-4">
+                <h2 className="text-sm font-medium">{t("detail.related")}</h2>
+                {related.map((memo) => (
+                  <Link
+                    className="rounded-lg border p-3 text-sm transition-colors hover:bg-muted"
+                    key={memo.name}
+                    params={{ memoId: memo.id }}
+                    to="/memo/$memoId"
+                  >
+                    <div className="line-clamp-2">{memo.content}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {[
+                        memo.via_relation
+                          ? t("detail.relatedViaRelation")
+                          : null,
+                        memo.shared_tags.length > 0
+                          ? t("detail.relatedSharedTags", {
+                              tags: memo.shared_tags
+                                .map((tag) => `#${tag}`)
+                                .join(" "),
+                            })
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </div>
+                  </Link>
+                ))}
+              </section>
+            )}
           </TabsContent>
           <TabsContent className="flex flex-col gap-4 pt-4" value="relations">
             <div className="flex flex-col gap-2">
@@ -443,7 +563,7 @@ function RelationGroup({
           >
             <div className="line-clamp-2">{memo.content}</div>
             <div className="mt-1 text-xs text-muted-foreground">
-              {relation.type}
+              {t(`detail.relationType.${relation.type}`)}
             </div>
           </Link>
           {onRemove && (

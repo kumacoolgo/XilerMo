@@ -1030,12 +1030,28 @@ describe("Memos native auth and transport boundaries", () => {
         createdAt: now,
         updatedAt: now,
       });
+    // FlareMo-only inbox kinds must stay invisible to compatible clients:
+    // upstream Memos has no daily_review type to map onto.
+    await createDb(env.DB)
+      .insert(memosNotifications)
+      .values({
+        receiverId: "users/owner",
+        senderId: "users/owner",
+        type: "daily_review",
+        status: "unread",
+        sourceEventId: "daily-review-fixture",
+        memoId: String(memo.name),
+        relatedMemoId: null,
+        createdAt: now,
+        updatedAt: now,
+      });
 
     const listedNotifications = await connectService(
       "UserService",
       "ListUserNotifications",
       { parent: "users/owner", pageSize: 10 },
     );
+    expect(listedNotifications.notifications).toHaveLength(1);
     const notification = (
       listedNotifications.notifications as Array<Record<string, unknown>>
     )[0];
@@ -1383,6 +1399,8 @@ async function createTestRuntime() {
     "0008_legal_scarecrow.sql",
     "0009_neat_iron_fist.sql",
     "0010_deep_gateway.sql",
+    "0011_daffy_ultron.sql",
+    "0012_slow_nick_fury.sql",
   ]) {
     const sql = await readFile(
       resolve(import.meta.dirname, `../../../migrations/${filename}`),

@@ -18,17 +18,39 @@ export function AuthPageFrame({
   title,
 }: {
   children: ReactNode;
-  description: string;
-  eyebrow: string;
+  description?: string;
+  eyebrow?: string;
   title: string;
 }) {
   const { t, toggleLocale } = useI18n();
 
   return (
-    <main className="flex min-h-svh items-center justify-center bg-[radial-gradient(circle_at_top,_var(--color-flame-100),_transparent_42%)] px-4 py-8 dark:bg-[radial-gradient(circle_at_top,_color-mix(in_oklab,var(--color-flame-400)_15%,transparent),_transparent_42%)]">
-      <div className="flex w-full max-w-md flex-col gap-4">
-        <header className="flex items-center justify-between px-1">
-          <FlareMoLogo labelClassName="text-lg" markClassName="size-7" />
+    <main className="grid min-h-svh lg:grid-cols-2">
+      <aside className="relative hidden overflow-hidden bg-flame-700 lg:flex lg:flex-col lg:justify-between lg:p-12">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0"
+        >
+          <div className="absolute -top-32 -left-32 size-112 rounded-full bg-flame-500/50 blur-3xl" />
+          <div className="absolute -right-24 -bottom-24 size-96 rounded-full bg-flame-coral/40 blur-3xl" />
+        </div>
+        <div className="relative flex items-center gap-2.5">
+          <img
+            alt=""
+            aria-hidden="true"
+            className="size-8"
+            src="/brand/flaremo-mark-dark-320.png"
+          />
+          <span className="font-heading text-lg font-semibold tracking-tight text-flame-50">
+            FlareMo
+          </span>
+        </div>
+      </aside>
+      <div className="relative flex items-center justify-center bg-[radial-gradient(circle_at_top,_var(--color-flame-100),_transparent_42%)] px-4 py-8 dark:bg-[radial-gradient(circle_at_top,_color-mix(in_oklab,var(--color-flame-400)_15%,transparent),_transparent_42%)]">
+        <header className="absolute inset-x-0 top-0 flex items-center justify-between p-4 lg:justify-end">
+          <span className="lg:hidden">
+            <FlareMoLogo labelClassName="text-lg" markClassName="size-7" />
+          </span>
           <Button
             aria-label={t("language.toggle")}
             size="sm"
@@ -40,19 +62,20 @@ export function AuthPageFrame({
             {t("language.next")}
           </Button>
         </header>
-        <Card className="shadow-lg shadow-flame-950/5">
+        <Card className="w-full max-w-md shadow-lg">
           <CardHeader className="gap-2">
-            <p className="text-xs font-semibold tracking-[0.16em] text-primary uppercase">
-              {eyebrow}
-            </p>
+            {eyebrow ? (
+              <p className="text-xs font-semibold tracking-[0.16em] text-primary uppercase">
+                {eyebrow}
+              </p>
+            ) : null}
             <CardTitle className="text-xl">{title}</CardTitle>
-            <CardDescription>{description}</CardDescription>
+            {description ? (
+              <CardDescription>{description}</CardDescription>
+            ) : null}
           </CardHeader>
           <CardContent>{children}</CardContent>
         </Card>
-        <p className="px-2 text-center text-xs leading-5 text-muted-foreground">
-          {t("auth.sessionSecurity")}
-        </p>
       </div>
     </main>
   );

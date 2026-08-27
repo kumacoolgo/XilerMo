@@ -2,12 +2,16 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type {
   DeleteTagResponse,
+  ListAppNotificationsResponse,
   ListMemosResponse,
   MemoContextResponse,
   MemoStatsResponse,
   RenameTagResponse,
   TagHierarchyResponse,
 } from "@flaremo/contracts";
+import { FLAREMO_API_VERSION } from "@flaremo/contracts";
+import { createDb, memos } from "@flaremo/db";
+import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import app from "./index";
@@ -120,6 +124,17 @@ describe("FlareMo Worker API", () => {
       resolve(import.meta.dirname, "../../../migrations/0010_deep_gateway.sql"),
       "utf8",
     );
+    const memorySchema = await readFile(
+      resolve(import.meta.dirname, "../../../migrations/0011_daffy_ultron.sql"),
+      "utf8",
+    );
+    const embeddingSchema = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../../migrations/0012_slow_nick_fury.sql",
+      ),
+      "utf8",
+    );
     await applyMigration(db, migration);
     await applyMigration(db, cleanup);
     await applyMigration(db, v020);
@@ -130,6 +145,8 @@ describe("FlareMo Worker API", () => {
     await applyMigration(db, userServiceParity);
     await applyMigration(db, webhookOutbox);
     await applyMigration(db, dataTasks);
+    await applyMigration(db, memorySchema);
+    await applyMigration(db, embeddingSchema);
     sessionCookie = await bootstrapAndSignIn();
   });
 
@@ -409,7 +426,7 @@ describe("FlareMo Worker API", () => {
     expect(health).toMatchObject({
       ok: true,
       product: "FlareMo",
-      version: "0.6.0",
+      version: FLAREMO_API_VERSION,
       update_repository: "example/flaremo",
       update_workflow_url:
         "https://github.com/example/flaremo/actions/workflows/flaremo-update.yml",
@@ -656,7 +673,7 @@ describe("FlareMo Worker API", () => {
     // Hierarchical filter: `工作` matches its descendants too.
     const workTagged = await json<ListMemosResponse>(
       await fetchApp(
-        "http://flaremo.test/api/app/memos?tag=" + encodeURIComponent("工作"),
+        `http://flaremo.test/api/app/memos?tag=${encodeURIComponent("工作")}`,
       ),
     );
     expect(workTagged.memos.map((memo) => memo.id)).toEqual(
@@ -873,6 +890,258 @@ describe("FlareMo Worker API", () => {
     ).toMatchObject({ status: 404 });
   });
 
+  it("serves daily review and random walk endpoints", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const monthDay = today.slice(5);
+    const dayAfter = new Date(Date.now() + 2 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const quietDay = new Date(Date.now() + 3 * 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const setCreatedAt = (name: string, createdAt: string) =>
+      env.DB.prepare("UPDATE memos SET created_at = ? WHERE id = ?")
+        .bind(createdAt, name)
+        .run();
+
+    // Daily review keeps past memos sharing today's month-day, ascending.
+    const pastOne = await createMemo("one year ago today #history");
+    const pastTwo = await createMemo("two years ago today");
+    const otherDayMemo = await createMemo("written on another day");
+    const todayMemo = await createMemo("written today");
+    const archivedPast = await createMemo("archived past note");
+    await setCreatedAt(pastOne.name, `2024-${monthDay}T10:00:00.000Z`);
+    await setCreatedAt(pastTwo.name, `2022-${monthDay}T09:00:00.000Z`);
+    await setCreatedAt(
+      otherDayMemo.name,
+      `2023-${dayAfter.slice(5)}T10:00:00.000Z`,
+    );
+    await setCreatedAt(archivedPast.name, `2021-${monthDay}T10:00:00.000Z`);
+    await json(
+      await fetchApp(`http://flaremo.test/api/v1/${archivedPast.name}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: "archived" }),
+      }),
+    );
+
+    const daily = await json(
+      await fetchApp(`http://flaremo.test/api/app/review/daily?date=${today}`),
+    );
+    expect(daily.memos.map((memo: { name: string }) => memo.name)).toEqual([
+      pastTwo.name,
+      pastOne.name,
+    ]);
+    expect(daily.memos[0].attachments).toEqual([]);
+
+    const emptyDaily = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/daily?date=${quietDay}`,
+      ),
+    );
+    expect(emptyDaily.memos).toEqual([]);
+    expect(
+      await fetchApp("http://flaremo.test/api/app/review/daily?date=08-11"),
+    ).toMatchObject({ status: 400 });
+    expect(
+      await fetchApp(
+        "http://flaremo.test/api/app/review/daily?date=2026-13-99",
+      ),
+    ).toMatchObject({ status: 400 });
+
+    // tzOffset decides which local date a memo belongs to: 22:15 UTC on the
+    // day before quietDay is already quietDay morning in UTC+8.
+    const lateNight = await createMemo("written late at night locally");
+    await setCreatedAt(
+      lateNight.name,
+      `2023-${dayAfter.slice(5)}T22:15:00.000Z`,
+    );
+
+    const shiftedDaily = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/daily?date=${quietDay}&tzOffset=480`,
+      ),
+    );
+    expect(
+      shiftedDaily.memos.map((memo: { name: string }) => memo.name),
+    ).toEqual([lateNight.name]);
+
+    const unshiftedDaily = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/daily?date=${quietDay}&tzOffset=-480`,
+      ),
+    );
+    expect(unshiftedDaily.memos).toEqual([]);
+
+    // "Exclude today" compares the shifted local date too: a memo whose
+    // local creation date equals the review date stays excluded.
+    const tomorrow = new Date(Date.now() + 86_400_000)
+      .toISOString()
+      .slice(0, 10);
+    const tonight = await createMemo("tonight memo");
+    await setCreatedAt(tonight.name, `${today}T22:15:00.000Z`);
+    const tomorrowDaily = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/daily?date=${tomorrow}&tzOffset=480`,
+      ),
+    );
+    expect(tomorrowDaily.memos).toEqual([]);
+
+    const normalNames = [
+      pastOne,
+      pastTwo,
+      otherDayMemo,
+      todayMemo,
+      lateNight,
+      tonight,
+    ].map((memo) => memo.name);
+    const random = await json(
+      await fetchApp("http://flaremo.test/api/app/review/random"),
+    );
+    expect(normalNames).toContain(random.memo.name);
+    expect(random.memo.attachments).toEqual([]);
+
+    const exhaustedRandom = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/random?exclude=${normalNames
+          .map(encodeURIComponent)
+          .join(",")}`,
+      ),
+    );
+    expect(exhaustedRandom.memo).toBeNull();
+
+    // Walk prefers a shared tag, then a relation, then a random jump.
+    const tagA = await createMemo("walk start #walktag");
+    const tagB = await createMemo("walk neighbor #walktag");
+    const tagWalk = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/walk?memoId=${encodeURIComponent(tagA.name)}`,
+      ),
+    );
+    expect(tagWalk.memo.name).toBe(tagB.name);
+    expect(tagWalk.via).toEqual({ type: "tag", tag: "walktag" });
+
+    const relA = await createMemo("relation walk start");
+    const relB = await createMemo("relation walk target");
+    await json(
+      await fetchApp(`http://flaremo.test/api/v1/${relA.name}/relations`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          relations: [{ related_memo: relB.name, type: "reference" }],
+        }),
+      }),
+    );
+    const relWalk = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/walk?memoId=${encodeURIComponent(relA.name)}`,
+      ),
+    );
+    expect(relWalk.memo.name).toBe(relB.name);
+    expect(relWalk.via).toEqual({ type: "relation" });
+
+    const jumpWalk = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/walk?memoId=${encodeURIComponent(tagA.name)}&exclude=${encodeURIComponent(tagB.name)}`,
+      ),
+    );
+    expect(jumpWalk.via).toEqual({ type: "jump" });
+    expect(jumpWalk.memo.name).not.toBe(tagA.name);
+
+    const allNormal = [
+      ...normalNames,
+      tagA.name,
+      tagB.name,
+      relA.name,
+      relB.name,
+    ];
+    const exhaustedWalk = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/review/walk?memoId=${encodeURIComponent(relA.name)}&exclude=${allNormal
+          .filter((name) => name !== relA.name)
+          .map(encodeURIComponent)
+          .join(",")}`,
+      ),
+    );
+    expect(exhaustedWalk.memo).toBeNull();
+    expect(exhaustedWalk.via).toBeNull();
+
+    expect(
+      await fetchApp(
+        "http://flaremo.test/api/app/review/walk?memoId=memos/nonexistent",
+      ),
+    ).toMatchObject({ status: 404 });
+  });
+
+  it("serves related memos ranked by relation and shared tags", async () => {
+    const source = await createMemo("related source #alpha #beta");
+    const linked = await createMemo("directly linked note");
+    const twoTags = await createMemo("two shared tags #alpha #beta");
+    const oneTag = await createMemo("one shared tag #alpha");
+    const unrelated = await createMemo("unrelated note #gamma");
+    const trashed = await createMemo("trashed note #alpha");
+    await json(
+      await fetchApp(`http://flaremo.test/api/v1/${source.name}/relations`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          relations: [{ related_memo: linked.name, type: "reference" }],
+        }),
+      }),
+    );
+    await fetchApp(`http://flaremo.test/api/v1/${trashed.name}`, {
+      method: "DELETE",
+    });
+
+    const related = await json(
+      await fetchApp(`http://flaremo.test/api/app/memos/${source.id}/related`),
+    );
+    expect(related.memos.map((memo: { name: string }) => memo.name)).toEqual([
+      linked.name,
+      twoTags.name,
+      oneTag.name,
+    ]);
+    expect(related.memos[0]).toMatchObject({
+      shared_tags: [],
+      via_relation: true,
+      attachments: [],
+    });
+    expect(related.memos[1]).toMatchObject({
+      shared_tags: ["alpha", "beta"],
+      via_relation: false,
+    });
+    expect(related.memos[2]).toMatchObject({
+      shared_tags: ["alpha"],
+      via_relation: false,
+    });
+
+    const limited = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/memos/${source.id}/related?limit=1`,
+      ),
+    );
+    expect(limited.memos).toHaveLength(1);
+
+    const reverse = await json(
+      await fetchApp(`http://flaremo.test/api/app/memos/${linked.id}/related`),
+    );
+    expect(reverse.memos.map((memo: { name: string }) => memo.name)).toEqual([
+      source.name,
+    ]);
+    expect(reverse.memos[0]).toMatchObject({ via_relation: true });
+
+    const none = await json(
+      await fetchApp(
+        `http://flaremo.test/api/app/memos/${unrelated.id}/related`,
+      ),
+    );
+    expect(none.memos).toEqual([]);
+
+    expect(
+      await fetchApp("http://flaremo.test/api/app/memos/nonexistent/related"),
+    ).toMatchObject({ status: 404 });
+  });
+
   it("supports byte ranges, hard-delete cleanup, and scheduled orphan cleanup", async () => {
     const memo = await createMemo("attachment lifecycle");
     const formData = new FormData();
@@ -925,6 +1194,67 @@ describe("FlareMo Worker API", () => {
     expect(
       await fetchApp(`http://flaremo.test/api/v1/${orphan.name}`),
     ).toMatchObject({ status: 404 });
+  });
+
+  it("creates idempotent daily review notifications from the scheduled run", async () => {
+    const scheduledTime = Date.now();
+    const runScheduled = () =>
+      app.scheduled({ scheduledTime } as ScheduledController, env);
+    const listNotifications = async () => {
+      const response = await fetchApp(
+        "http://flaremo.test/api/app/notifications",
+      );
+      if (!response.ok) {
+        throw new Error(
+          `list failed: ${response.status} ${await response.text()}`,
+        );
+      }
+      return json<ListAppNotificationsResponse>(response);
+    };
+
+    // Without on-this-day history the cron run files nothing.
+    await runScheduled();
+    expect((await listNotifications()).notifications).toEqual([]);
+
+    const memo = await createMemo<{ id: string; name: string }>(
+      "on this day last year",
+    );
+    const lastYear = new Date(scheduledTime);
+    lastYear.setUTCFullYear(lastYear.getUTCFullYear() - 1);
+    await createDb(env.DB)
+      .update(memos)
+      .set({ createdAt: lastYear.toISOString() })
+      .where(eq(memos.id, memo.name));
+
+    await runScheduled();
+    const first = await listNotifications();
+    expect(first.notifications).toHaveLength(1);
+    expect(first.notifications[0]).toMatchObject({
+      type: "daily_review",
+      status: "unread",
+      memo: memo.name,
+      memo_snippet: "on this day last year",
+    });
+
+    // The receiver/source-event/type unique index makes a repeat run a no-op.
+    await runScheduled();
+    expect((await listNotifications()).notifications).toHaveLength(1);
+
+    const notificationId = first.notifications[0].name.split("/").pop() ?? "";
+    const archived = await json<{ status: string }>(
+      await fetchApp(
+        `http://flaremo.test/api/app/notifications/${notificationId}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ status: "archived" }),
+        },
+      ),
+    );
+    expect(archived.status).toBe("archived");
+    expect((await listNotifications()).notifications[0].status).toBe(
+      "archived",
+    );
   });
 
   it("serves public share content and attachments by token only", async () => {
@@ -1067,9 +1397,16 @@ describe("FlareMo Worker API", () => {
       (chunk) => chunk.kind === "memos",
     );
     expect(memosChunk).toBeTruthy();
+    if (!memosChunk) {
+      throw new Error("expected a memos chunk in the export manifest");
+    }
+    const chunkFileName = memosChunk.key.split("/").at(-1);
+    if (!chunkFileName) {
+      throw new Error("expected the chunk key to end in a file name");
+    }
     const chunkResponse = await fetchApp(
       `http://flaremo.test/api/v1/export/tasks/${taskId}/data/${encodeURIComponent(
-        memosChunk!.key.split("/").at(-1)!,
+        chunkFileName,
       )}`,
     );
     expect(chunkResponse.ok).toBe(true);
@@ -1091,7 +1428,10 @@ describe("FlareMo Worker API", () => {
         body: formData,
       }),
     );
-    const attachmentId = uploaded.name.split("/").at(-1)!;
+    const attachmentId = uploaded.name.split("/").at(-1);
+    if (!attachmentId) {
+      throw new Error("expected the attachment name to end in an id");
+    }
 
     const created = await json<{ task: { id: string } }>(
       await fetchApp("http://flaremo.test/api/v1/export/tasks", {

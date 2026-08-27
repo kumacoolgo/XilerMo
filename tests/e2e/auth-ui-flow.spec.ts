@@ -1,7 +1,6 @@
 import { expect, test } from "@playwright/test";
-import { E2E_AUTH_STATE } from "./auth-fixture";
+import { E2E_AUTH_STATE, E2E_EMAIL } from "./auth-fixture";
 
-const TEST_USERNAME = "e2e_owner";
 const TEST_PASSWORD =
   "flaremo-e2e-initial-password-never-use-in-production-2026";
 
@@ -15,13 +14,11 @@ test("keeps setup one-time, logs in, and manages a PAT from the account UI", asy
   await page.goto("/setup");
   await expect(page).toHaveURL(/\/login$/);
 
-  const username = page.getByRole("textbox", {
-    name: /用户名|Username/i,
-  });
+  const email = page.getByRole("textbox", { name: /^邮箱$|^Email$/i });
   const password = page.getByRole("textbox", {
     name: /^密码$|^Password$/i,
   });
-  await username.fill(TEST_USERNAME);
+  await email.fill(E2E_EMAIL);
   await password.fill(TEST_PASSWORD);
   await page.getByRole("button", { name: /^登录$|^Sign in$/i }).click();
 
@@ -38,6 +35,8 @@ test("keeps setup one-time, logs in, and manages a PAT from the account UI", asy
   await expect(
     page.getByRole("heading", { name: /账户与访问|Account/i }),
   ).toBeVisible();
+
+  await page.getByRole("tab", { name: /访问令牌|Access tokens/i }).click();
 
   const tokenName = `UI E2E client ${Date.now()}`;
   await page

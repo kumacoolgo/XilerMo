@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { Navigate, useNavigate } from "@tanstack/react-router";
+import { Link, Navigate, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { getBootstrapStatus } from "@/api";
+import { getBootstrapStatus, getRegistrationStatus } from "@/api";
 import { authClient } from "@/auth-client";
 import { AuthPageFrame, errorMessage } from "@/components/auth-page-frame";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,12 @@ export function LoginPage() {
     queryFn: getBootstrapStatus,
     retry: false,
   });
-  const [username, setUsername] = useState("");
+  const registrationQuery = useQuery({
+    queryKey: ["auth-registration-status"],
+    queryFn: getRegistrationStatus,
+    retry: false,
+  });
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -49,9 +54,9 @@ export function LoginPage() {
     setFormError(null);
     setIsSubmitting(true);
     try {
-      const result = await authClient.signIn.username({
+      const result = await authClient.signIn.email({
         password,
-        username: username.trim(),
+        email: email.trim(),
       });
       if (result.error) {
         throw result.error;
@@ -75,11 +80,7 @@ export function LoginPage() {
   };
 
   return (
-    <AuthPageFrame
-      description={t("auth.loginDescription")}
-      eyebrow={t("auth.nativeAccess")}
-      title={t("auth.loginTitle")}
-    >
+    <AuthPageFrame title={t("auth.loginTitle")}>
       {bootstrapQuery.isError && (
         <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/8 px-3 py-2 text-sm text-destructive">
           {t("auth.statusUnavailable")}
@@ -102,19 +103,20 @@ export function LoginPage() {
       >
         <label
           className="flex flex-col gap-1.5 text-sm font-medium"
-          htmlFor="login-username"
+          htmlFor="login-email"
         >
-          {t("auth.username")}
+          {t("auth.email")}
           <Input
             autoCapitalize="none"
-            autoComplete="username"
+            autoComplete="email"
             disabled={isSubmitting}
-            id="login-username"
-            maxLength={30}
-            name="username"
+            id="login-email"
+            maxLength={320}
+            name="email"
             required
-            value={username}
-            onChange={(event) => setUsername(event.target.value)}
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
           />
         </label>
         <label
@@ -147,6 +149,24 @@ export function LoginPage() {
         >
           {isSubmitting ? t("auth.signingIn") : t("auth.signIn")}
         </Button>
+        <p className="text-center text-sm">
+          <Link
+            className="text-muted-foreground underline-offset-4 hover:underline"
+            to="/recover"
+          >
+            {t("auth.forgotPasswordHint")}
+          </Link>
+        </p>
+        {registrationQuery.data?.registration_open && (
+          <p className="text-center text-sm">
+            <Link
+              className="text-primary underline-offset-4 hover:underline"
+              to="/register"
+            >
+              {t("auth.registerLink")}
+            </Link>
+          </p>
+        )}
       </form>
     </AuthPageFrame>
   );
