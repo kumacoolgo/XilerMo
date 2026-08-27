@@ -1,22 +1,42 @@
 import type {
+  AppNotificationDto,
   AttachmentDto,
   CreateMemoInput,
+  CreateMemoryInput,
+  CreateProjectInput,
+  CreateTaskInput,
+  DailyReviewResponse,
   DataTaskDto,
-  DataTaskListResponse,
   DeleteTagResponse,
-  ExportManifest,
   ImportResult,
+  ListAppNotificationsResponse,
   ListMemosResponse,
   MemoContextResponse,
   MemoDto,
+  MemoryDto,
+  MemoryRelationDto,
+  MemoryRevisionDto,
   MemoState,
   MemoStatsResponse,
   MemoVisibility,
+  ProjectDto,
   PublicShareDto,
+  RandomMemoResponse,
+  RelatedMemosResponse,
   RenameTagResponse,
+  ReviewWalkVia,
   ShareDto,
   TagHierarchyResponse,
+  TaskActivityDto,
+  TaskDto,
+  TaskPriority,
+  TaskStatus,
   UpdateMemoInput,
+  UpdateMemoryInput,
+  UpdateProjectInput,
+  UpdateTaskInput,
+  VectorUsageReport,
+  WalkNextResponse,
 } from "@flaremo/contracts";
 
 export type Attachment = AttachmentDto;
@@ -25,11 +45,33 @@ export type MemoPayload = MemoDto["payload"];
 export type Share = ShareDto;
 export type PublicShare = PublicShareDto;
 export type MemoContext = MemoContextResponse;
+export type RelatedMemo = RelatedMemosResponse["memos"][number];
 export type TagHierarchyNode = TagHierarchyResponse["tags"][number];
-export type { MemoState, MemoStatsResponse, MemoVisibility };
+export type AppNotification = AppNotificationDto;
+export type Memory = MemoryDto;
+export type MemoryRevision = MemoryRevisionDto;
+export type MemoryRelation = MemoryRelationDto;
+export type {
+  MemoState,
+  MemoStatsResponse,
+  MemoVisibility,
+  ReviewWalkVia,
+  VectorUsageReport,
+};
 
 export type CreateMemoRequest = CreateMemoInput;
 export type UpdateMemoRequest = UpdateMemoInput;
+export type CreateMemoryRequest = CreateMemoryInput;
+export type UpdateMemoryRequest = UpdateMemoryInput;
+
+export type Project = ProjectDto;
+export type Task = TaskDto;
+export type TaskActivity = TaskActivityDto;
+export type CreateProjectRequest = CreateProjectInput;
+export type UpdateProjectRequest = UpdateProjectInput;
+export type CreateTaskRequest = CreateTaskInput;
+export type UpdateTaskRequest = UpdateTaskInput;
+export type { TaskPriority, TaskStatus };
 
 export type ListMemoParams = {
   state?: MemoState;
@@ -86,6 +128,32 @@ export type PersonalAccessToken = {
 
 export const AUTHENTICATION_REQUIRED_EVENT = "flaremo:authentication-required";
 
+export type RegistrationStatus = {
+  registration_open: boolean;
+  initialized: boolean;
+};
+
+export type CurrentFlareMoUser = {
+  id: string;
+  role: "owner" | "member";
+  name: string;
+  email: string;
+  username: string;
+};
+
+export type AdminSettings = {
+  registration_open: boolean;
+};
+
+export type AdminUser = {
+  id: string;
+  email: string;
+  name: string;
+  username: string;
+  role: "owner" | "member";
+  created_at: string;
+};
+
 export class ApiError extends Error {
   readonly status: number;
 
@@ -108,6 +176,19 @@ export async function listMemos(params: ListMemoParams = {}) {
   if (params.page_token) query.set("page_token", params.page_token);
 
   return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`);
+}
+
+export async function semanticSearchMemos(query: string, limit = 10) {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  params.set("limit", String(limit));
+  return apiRequest<{ memos: MemoDto[]; degraded: boolean }>(
+    `/api/app/search/semantic?${params.toString()}`,
+  );
+}
+
+export async function getVectorUsage() {
+  return apiRequest<VectorUsageReport>("/api/app/usage/vector");
 }
 
 export async function getTagHierarchy() {
@@ -133,8 +214,276 @@ export async function getMemoStats(timeZone: string) {
   return apiRequest<MemoStatsResponse>(`/api/app/stats?${query.toString()}`);
 }
 
+export async function getDailyReview(date: string, tzOffsetMinutes: number) {
+  const query = new URLSearchParams({
+    date,
+    tzOffset: String(tzOffsetMinutes),
+  });
+  return apiRequest<DailyReviewResponse>(
+    `/api/app/review/daily?${query.toString()}`,
+  );
+}
+
+export async function getRandomWalkMemo(exclude: string[] = []) {
+  const query = new URLSearchParams();
+  if (exclude.length > 0) query.set("exclude", exclude.join(","));
+  return apiRequest<RandomMemoResponse>(
+    `/api/app/review/random?${query.toString()}`,
+  );
+}
+
+export async function getWalkNextMemo(memoId: string, exclude: string[] = []) {
+  const query = new URLSearchParams({ memoId });
+  if (exclude.length > 0) query.set("exclude", exclude.join(","));
+  return apiRequest<WalkNextResponse>(
+    `/api/app/review/walk?${query.toString()}`,
+  );
+}
+
 export async function getAppInfo() {
   return apiRequest<AppInfo>("/api/app/health");
+}
+
+export async function listNotifications() {
+  const query = new URLSearchParams({ page_size: "50" });
+  return apiRequest<ListAppNotificationsResponse>(
+    `/api/app/notifications?${query.toString()}`,
+  );
+}
+
+export async function archiveNotification(name: string) {
+  const id = name.split("/").pop() ?? name;
+  return apiRequest<AppNotification>(
+    `/api/app/notifications/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify({ status: "archived" }) },
+  );
+}
+
+export type ListMemoriesParams = {
+  q?: string;
+  type?: Memory["type"];
+  kind?: Memory["kind"];
+  scope_type?: Memory["scope_type"];
+  scope_key?: string;
+  tier?: Memory["tier"];
+  verification?: Memory["verification"];
+  status?: Memory["status"];
+  source_agent?: string;
+  needs_review?: boolean;
+};
+
+export async function listMemories(params: ListMemoriesParams = {}) {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.type) query.set("type", params.type);
+  if (params.kind) query.set("kind", params.kind);
+  if (params.scope_type) query.set("scope_type", params.scope_type);
+  if (params.scope_key) query.set("scope_key", params.scope_key);
+  if (params.tier) query.set("tier", params.tier);
+  if (params.verification) query.set("verification", params.verification);
+  if (params.status) query.set("status", params.status);
+  if (params.source_agent) query.set("source_agent", params.source_agent);
+  if (params.needs_review !== undefined)
+    query.set("needs_review", String(params.needs_review));
+
+  return apiRequest<{ memories: Memory[] }>(
+    `/api/app/memory?${query.toString()}`,
+  );
+}
+
+export async function listMemoryReview() {
+  return apiRequest<{ memories: Memory[] }>("/api/app/memory/review");
+}
+
+export async function createMemory(input: CreateMemoryRequest) {
+  return apiRequest<{ duplicate: boolean; memory: Memory }>("/api/app/memory", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function updateMemory(id: string, input: UpdateMemoryRequest) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function deleteMemory(id: string) {
+  return apiRequest<{ ok: true }>(`/api/app/memory/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function confirmMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/confirm`,
+    { method: "POST" },
+  );
+}
+
+export async function lockMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/lock`,
+    { method: "POST" },
+  );
+}
+
+export async function unlockMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/unlock`,
+    { method: "POST" },
+  );
+}
+
+export async function archiveMemory(id: string) {
+  return apiRequest<{ memory: Memory }>(
+    `/api/app/memory/${encodeURIComponent(id)}/archive`,
+    { method: "POST" },
+  );
+}
+
+export async function listMemoryRevisions(id: string) {
+  return apiRequest<{ revisions: MemoryRevision[] }>(
+    `/api/app/memory/${encodeURIComponent(id)}/revisions`,
+  );
+}
+
+export async function listMemoryRelations(id: string) {
+  return apiRequest<{ relations: MemoryRelation[] }>(
+    `/api/app/memory/${encodeURIComponent(id)}/relations`,
+  );
+}
+
+// --- Projects ---------------------------------------------------------------
+
+export async function listProjects(
+  params: { status?: Project["status"] } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.status) query.set("status", params.status);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<{ projects: Project[] }>(`/api/app/projects${suffix}`);
+}
+
+export async function createProject(input: CreateProjectRequest) {
+  return apiRequest<{ project: Project }>("/api/app/projects", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getProject(id: string) {
+  return apiRequest<{ project: Project }>(
+    `/api/app/projects/${encodeURIComponent(id)}`,
+  );
+}
+
+export async function updateProject(id: string, input: UpdateProjectRequest) {
+  return apiRequest<{ project: Project }>(
+    `/api/app/projects/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function archiveProject(id: string, archived: boolean) {
+  return apiRequest<{ project: Project }>(
+    `/api/app/projects/${encodeURIComponent(id)}/${
+      archived ? "archive" : "unarchive"
+    }`,
+    { method: "POST" },
+  );
+}
+
+export async function deleteProject(id: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/app/projects/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+// --- Tasks ------------------------------------------------------------------
+
+export async function listTasks(
+  params: { project_id?: string; status?: Task["status"] } = {},
+) {
+  const query = new URLSearchParams();
+  if (params.project_id) query.set("project_id", params.project_id);
+  if (params.status) query.set("status", params.status);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiRequest<{ tasks: Task[] }>(`/api/app/tasks${suffix}`);
+}
+
+export async function createTask(input: CreateTaskRequest) {
+  return apiRequest<{ task: Task }>("/api/app/tasks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function getTask(id: string) {
+  return apiRequest<{ task: Task }>(`/api/app/tasks/${encodeURIComponent(id)}`);
+}
+
+export async function updateTask(id: string, input: UpdateTaskRequest) {
+  return apiRequest<{ task: Task }>(
+    `/api/app/tasks/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function deleteTask(id: string) {
+  return apiRequest<{ ok: true }>(`/api/app/tasks/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function reorderTasks(projectId: string, taskIds: string[]) {
+  return apiRequest<{ tasks: Task[] }>("/api/app/tasks/reorder", {
+    method: "POST",
+    body: JSON.stringify({ project_id: projectId, task_ids: taskIds }),
+  });
+}
+
+export async function listTaskActivity(id: string) {
+  return apiRequest<{ activity: TaskActivity[] }>(
+    `/api/app/tasks/${encodeURIComponent(id)}/activity`,
+  );
+}
+
+export async function createMemoryFromMemo(
+  memoId: string,
+  input: {
+    content?: string;
+    type?: Memory["type"];
+    kind?: Memory["kind"];
+    scope_type?: Memory["scope_type"];
+    scope_key?: string;
+    tier?: Memory["tier"];
+    importance?: number;
+    lock?: boolean;
+  },
+) {
+  return apiRequest<{ duplicate: boolean; memory: Memory }>(
+    `/api/app/memos/${encodeURIComponent(memoId)}/memory`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function promoteMemoryToMemo(id: string) {
+  return apiRequest<{ memory: Memory; memo: string }>(
+    `/api/app/memory/${encodeURIComponent(id)}/promote`,
+    { method: "POST" },
+  );
 }
 
 export async function getLatestRelease(): Promise<LatestRelease> {
@@ -184,8 +533,115 @@ export async function getBootstrapStatus() {
   );
 }
 
+export async function getRegistrationStatus() {
+  return apiRequest<RegistrationStatus>(
+    "/api/auth/flaremo/register/status",
+    {},
+    { authRequired: false },
+  );
+}
+
+export async function registerAccount(input: {
+  name: string;
+  email: string;
+  password: string;
+}) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/register",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function getCurrentFlareMoUser() {
+  return apiRequest<CurrentFlareMoUser>("/api/app/me");
+}
+
+export async function getAdminSettings() {
+  return apiRequest<AdminSettings>("/api/app/admin/settings");
+}
+
+export async function updateAdminSettings(input: {
+  registration_open: boolean;
+}) {
+  return apiRequest<AdminSettings>("/api/app/admin/settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listAdminUsers() {
+  return apiRequest<{ users: AdminUser[] }>("/api/app/admin/users");
+}
+
+export async function createAdminUser(input: {
+  name: string;
+  email: string;
+  password: string;
+}) {
+  return apiRequest<AdminUser>("/api/app/admin/users", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteAdminUser(id: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/app/admin/users/${encodeURIComponent(id)}`,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export async function requestAdminPasswordReset(id: string) {
+  return apiRequest<{
+    token: string;
+    reset_path: string;
+    expires_in_seconds: number;
+  }>(`/api/app/admin/users/${encodeURIComponent(id)}/reset-password`, {
+    method: "POST",
+  });
+}
+
+export async function resetPassword(input: {
+  token: string;
+  newPassword: string;
+}) {
+  return apiRequest<{ status: boolean }>(
+    "/api/auth/reset-password",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        newPassword: input.newPassword,
+        token: input.token,
+      }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function recoverOwner(input: {
+  newPassword: string;
+  recoverySecret: string;
+}) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/recover",
+    {
+      method: "POST",
+      headers: {
+        "x-flaremo-recovery-secret": input.recoverySecret,
+      },
+      body: JSON.stringify({ new_password: input.newPassword }),
+    },
+    { authRequired: false },
+  );
+}
+
 export async function bootstrapOwner(input: {
-  username: string;
   name: string;
   email: string;
   password: string;
@@ -199,7 +655,6 @@ export async function bootstrapOwner(input: {
         "x-flaremo-bootstrap-secret": input.bootstrapSecret,
       },
       body: JSON.stringify({
-        username: input.username,
         name: input.name,
         email: input.email,
         password: input.password,
@@ -233,6 +688,16 @@ export async function revokePersonalAccessToken(id: string) {
     `/api/app/account/personal-access-tokens/${encodeURIComponent(id)}/revoke`,
     { method: "POST" },
   );
+}
+
+export async function changeEmail(input: {
+  current_password: string;
+  new_email: string;
+}) {
+  return apiRequest<{ ok: true }>("/api/app/account/email", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export async function createMemo(input: CreateMemoRequest) {
@@ -297,13 +762,6 @@ export async function bindMemoAttachments(memo: string, attachments: string[]) {
   );
 }
 
-export async function deleteAttachment(id: string) {
-  return apiRequest<{ ok: true }>(
-    `/api/v1/attachments/${encodeURIComponent(id)}`,
-    { method: "DELETE" },
-  );
-}
-
 export async function createShare(memo: string) {
   return apiRequest<Share>(`/api/v1/memos/${encodeURIComponent(memo)}/shares`, {
     method: "POST",
@@ -313,6 +771,12 @@ export async function createShare(memo: string) {
 
 export async function getMemoContext(id: string) {
   return apiRequest<MemoContext>(`/api/app/memos/${encodeURIComponent(id)}`);
+}
+
+export async function getRelatedMemos(id: string) {
+  return apiRequest<RelatedMemosResponse>(
+    `/api/app/memos/${encodeURIComponent(id)}/related`,
+  );
 }
 
 export async function revokeShare(id: string) {
@@ -354,26 +818,11 @@ export async function getPublicShare(token: string) {
   );
 }
 
-export async function exportData() {
-  return apiRequest<unknown>("/api/v1/export");
-}
-
-export async function importData(bundle: unknown) {
-  return apiRequest<ImportResult>("/api/v1/import", {
-    method: "POST",
-    body: JSON.stringify(bundle),
-  });
-}
-
 export async function createExportTask() {
   return apiRequest<{ task: DataTaskDto }>("/api/v1/export/tasks", {
     method: "POST",
     body: JSON.stringify({}),
   });
-}
-
-export async function listDataTasks() {
-  return apiRequest<DataTaskListResponse>("/api/v1/export/tasks");
 }
 
 export async function getDataTask(id: string) {
@@ -390,20 +839,6 @@ export async function createImportTask(input: {
     "/api/v1/import/tasks",
     { method: "POST", body: JSON.stringify(input) },
   );
-}
-
-export async function downloadExportManifest(id: string) {
-  return apiRequest<ExportManifest>(
-    `/api/v1/export/tasks/${encodeURIComponent(id)}/manifest`,
-  );
-}
-
-export function exportTaskDataUrl(id: string, chunk: string) {
-  return `/api/v1/export/tasks/${encodeURIComponent(id)}/data/${encodeURIComponent(chunk)}`;
-}
-
-export function exportTaskAttachmentUrl(id: string, attachmentId: string) {
-  return `/api/v1/export/tasks/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`;
 }
 
 export async function downloadExportJson(id: string) {

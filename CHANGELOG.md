@@ -2,9 +2,96 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
-## Unreleased
+## v0.9.0
 
-后续变更将在下一次 release 汇总。
+账户邮箱自助修改版本。这个版本在无邮件基础设施的前提下，为账户设置页新增"修改邮箱"能力：修改登录邮箱前必须验证当前密码（避免裸改登录标识），改邮箱不引入邮件服务，验证步骤集中在 route 层，未来接入邮件 OTP 时可替换而不改路由契约。
+
+### 新增能力
+
+- 修改邮箱：账户设置页 security tab 新增"修改邮箱"卡片，输入新邮箱 + 当前密码提交。
+- 后端 `POST /api/app/account/email`：经 `getBrowserRequestContext` 校验 cookie session 与 Origin allowlist；用 `auth.api.verifyPassword` 校验当前密码（错误返回 400）；随后更新 Better Auth `auth_users` 登录凭据（标记 `email_verified=true`、刷新当前会话），再同步 FlareMo 业务 `users` 表的 email。
+- 邮箱唯一性保护：两张 unique email 表都做查重，冲突返回 409；domain `updateFlaremoUserEmail` 负责业务表同步、大小写归一与冲突检查。
+
+### Cloudflare、数据库与兼容影响
+
+- 无数据库 migration、无 Cloudflare 资源变化、无新增 env var。
+- `/api/v1/*` Memos 兼容面不变；`/mcp` 语义不变。
+- 认证与 Origin 校验语义不变：cookie session 状态变更仍要求精确 Origin 匹配，PAT 请求语义不变。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 改邮箱会同时更新 Better Auth 登录凭据与 FlareMo 业务用户表；当前会话保持登录，其他已登录会话不受影响。
+
+## v0.8.0
+
+语义搜索与向量用量版本。这个版本给 memo 和 Agent Memory 接入语义检索（D1 仍是唯一事实源，Vectorize 只存可重建的派生索引），默认使用 Cloudflare 内置 embedding 模型 `@cf/qwen/qwen3-embedding-0.6b`（1024 维），做成可插拔 provider（`workers-ai` / `http` / `none` 三档），并在账户页新增向量用量面板。数据库新增 `embedding_tasks` 与 `usage_counters` 两张表、`memos` 表补 embedding 状态列，全部是新增/加列，向后兼容。
+
+### 新增能力
+
+- 可插拔 embedding provider：`workers-ai`（默认，零外部 key）、`http`（外部 REST，API key 走 Wrangler secret）、`none`（关闭语义搜索，退回 FTS5 关键词）。由 `FLAREMO_EMBEDDING_PROVIDER` 选择，模型与维度可配置。
+- memo 语义搜索（"找一找"）：时间线搜索框新增语义切换，`GET /api/app/search/semantic` 用自然语言召回相关 memo；Vectorize 只返回候选 id，命中后回 D1 校验 owner/status，未索引或 provider 不可用时返回 `degraded=true` 并退回关键词搜索。
+- Agent Memory 语义召回：`recallMemories` 优先走 Vectorize 相似度（`matched_by=semantic`），失败或未提供 provider 时退回 FTS5（`matched_by=fts`）；`/memory/mcp` 的 `memory_recall` 工具 schema 不变。
+- 增量索引 outbox：memo/memory 写路径在 D1 batch 内原子入队 `embedding_tasks`，`dispatchEmbeddingOutbox` 异步 embed + Vectorize upsert/delete，`ctx.waitUntil` 与 cron 双驱动，带 lease/claim/backoff/prune 崩溃恢复。
+- 全量重建：`rebuildEmbeddingIndexes` 从 D1 幂等重建两个 Vectorize index（首次回填、换模型/改维度、索引损坏恢复）。
+- 向量用量面板：`GET /api/app/usage/vector` 聚合 `Vectorize describe()` 的存储维度 + D1 `usage_counters` 的查询维度，账户页展示自测消耗 vs 配置的免费额度，附 Cloudflare Dashboard 兜底说明。
+
+### Cloudflare、数据库与兼容影响
+
+- 新增 D1 migration `0012_slow_nick_fury.sql`：`memos` 加 `embedding_status/embedding_version/embedded_at/embedding_error` 四列，新增 `embedding_tasks`、`usage_counters` 两张表；纯新增，向后兼容。
+- 新增 Vectorize binding（`flaremo-memos`、`flaremo-memories`，1024 维 cosine）与 Workers AI binding（`AI`）。
+- 新增 env var：`FLAREMO_EMBEDDING_PROVIDER/MODEL/DIMENSIONS`、`FLAREMO_EMBEDDING_API_URL/API_KEY`（http 档可选）、`FLAREMO_VECTORIZE_STORED_LIMIT/QUERIED_LIMIT`（默认 Workers Free 500 万存储 / 3000 万查询维度）。
+- `/api/v1/*` Memos 兼容面不变；`/mcp`、`/api/v1/mcp`、`/memory/mcp` 语义不变（memory_recall 仅召回方式升级）。
+- 认证与 Origin 校验语义不变；语义搜索与召回复用 cookie session 与 `memos_pat_` PAT。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`；`pnpm deploy` 会在发布 Worker 前自动应用 0012 migration。
+- 首次接入后存量 memo/memory 不会自动回填向量，需手动触发一次全量重建；此后增量自动同步。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、API key、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 语义搜索是可降级能力：任何 embedding/Vectorize 失败只影响召回，不影响写、导出、分享与 Memos 兼容；`FLAREMO_EMBEDDING_PROVIDER=none` 时行为与 v0.7.0 完全一致。
+
+## v0.7.0
+
+Agent Memory 中枢与回顾体系版本。这个版本补齐 flomo 回顾体系（R3 第一批），落地 Agent Memory（AI 长期记忆中枢，P0：四张 D1 表 + FTS5 + `/memory/mcp` 六工具 + `/memory` 管理 UI + Memo↔Memory 双向连接 + 导入导出纳入），并完成 lint 零告警与文档收口。数据库新增 memory 四张表，全部是新增表，不影响既有数据。
+
+### 新增能力
+
+- 每日回顾：新增 `/review/daily` 页面，按「N 年前的今天」分组展示往年今日创建的 memo；后端 `GET /api/app/review/daily?date=YYYY-MM-DD`（时区由前端传本地日期规避）。
+- 随机漫步：新增 `/review/walk` 页面，从随机 memo 出发沿共享标签、引用关系游走（无关联时大跨越），支持漫步历史回看；「结束漫步」输出明信片式总结（经过条数、总字数、时间跨度）；后端 `GET /api/app/review/random`、`GET /api/app/review/walk`，返回 `via`（tag/relation/jump）标记路径来源。
+- 侧边栏 explorer 新增「回顾」区，含每日回顾与随机漫步入口。
+- Agent Memory（AI 长期记忆）：新增 `memory_items` / `memory_revisions` / `memory_relations` / `memory_resource_links` 四张 D1 表，配 `memory_fts` FTS5 虚表（trigram 分词）与增删改触发器。D1 仍是唯一事实源，FTS 只作检索索引，可随时重建。
+- 记忆写入门禁：内容归一化、SHA-256 指纹精确去重、4000 字上限、凭据安全检测（命中 `Authorization`/`cookie`/`memos_pat_`/私钥/密码直接拒绝）。Agent 只能以 `observed`/`inferred` 写入，永远不能覆盖用户 `confirmed`/`locked` 的记忆，冲突进入 Review。
+- 记忆召回：scope 隔离（global + 当前 workspace/project + 当前 agent，禁止跨 project）+ FTS5 + 权威/重要度/置信度/recency 排序；episodic 记忆随时间衰减，semantic/procedural/decision 不衰减。
+- Agent Memory MCP：新增 `/memory/mcp` 无状态 Streamable HTTP 端点，暴露 `memory_bootstrap` / `memory_recall` / `memory_remember` / `memory_checkpoint` / `memory_link` / `memory_forget` 六个 tool，policy 内联进 tool description，复用 `memos_pat_` PAT 认证。
+- Memory 管理 UI：新增 `/memory` 页面（Core / Projects / Recent / Review / Archive 分栏），支持查看、确认、锁定、归档、删除、历史版本与来源展示；memory 卡片新增「编辑」入口（内容 / type / kind / scope / importance，走 `PATCH /api/app/memory/:id`）。
+- Memo ↔ Memory 双向连接：memo 详情可「记为 Memory」（`derived_from`），memory 可「转为记录」（`promoted_to`），memo 上下文与导出均返回相关 memory。
+- 导出导入纳入：导入导出 bundle 升到 version 3，纳入 memory 四表；fingerprint、access counter 与 embedding 派生字段不导出，导入时重置为 `not_indexed`。
+- 文档：新增 [docs/agent-memory.md](./docs/agent-memory.md) 接入 runbook；product-requirements、ROADMAP、README、llms.txt 同步 Agent Memory 定位与后续方向（语义召回、自动固化）。
+
+### 修复与清理
+
+- 删除 13 个未使用的 i18n 死文案 key（中英双语）与重复 key `update.open`（统一为 `update.title`）。
+- 接上已定义但未使用的文案：删除标签现在弹确认对话框（`explorer.tagDeleteConfirm`）；导入任务创建后提示 `toast.importStarted`，导出轮询提示 `toast.taskPending`（按 toast id 去重）。
+- 本地化硬编码字符串：标签树「展开/折叠」aria-label、Dialog/Sheet 的 sr-only Close、memo 详情页置顶徽章（新增 `memo.pinnedBadge`）。
+- 删除死代码：`DialogFooter` 永不渲染的 Close 按钮、`apps/web/src/api.ts` 中 7 个无调用方的导出函数。
+- 清理零信息增量的内部腔文案：登录/初始化页删除「登录状态仅保存在 HttpOnly Cookie…」安全说明和「原生访问」眉标（账户页同步移除）；简化初始化不可用、初始化密钥说明、改密影响说明和 PAT 描述的措辞。
+- lint 零告警：删除未使用 import，导出任务收尾与 API 测试的 non-null assertion 改为显式守卫。
+
+### Cloudflare、数据库与兼容影响
+
+- 新增 D1 migration `0011_daffy_ultron.sql`：新增 `memory_items`、`memory_revisions`、`memory_relations`、`memory_resource_links` 四张表及 `memory_fts` FTS5 虚拟表与增删改触发器；全部是新增表，向后兼容上一正式版本，不需要回填。
+- Worker 路由新增 `/memory/mcp`（Agent 无状态 MCP，PAT 认证）与 `/api/app/memory`（浏览器 cookie session 管理面）；`assets.run_worker_first` 增加 `/memory/*`。
+- 无 R2 命名空间变化、无 cron 变化、无 Cloudflare 资源绑定变化。
+- `/api/v1/*` Memos 兼容面不变：`/mcp`、`/api/v1/mcp` 行为与 v0.6.0 一致，memory 走独立的 `/memory/mcp` 前缀，不撞既有 MCP。
+- 认证与 Origin 校验语义不变：memory 复用 Better Auth cookie session 与 `memos_pat_` PAT，不新增第二套令牌。
+
+### 升级说明
+
+- 执行标准的 `pnpm verify`、`pnpm deploy:dry-run` 和 `pnpm deploy`；`pnpm deploy` 会在发布 Worker 前自动应用 0011 migration（memory 四张表 + FTS5，纯新增）。
+- 保持现有 `FLAREMO_PUBLIC_URL`、`FLAREMO_TRUSTED_ORIGINS`、`BETTER_AUTH_SECRET`、`FLAREMO_BOOTSTRAP_SECRET` 和已创建 PAT 配置；不要把任何 secret、密码、cookie 或 PAT 写入 Git、release notes、日志或聊天。
+- 部署后重新验证登录页、bootstrap status、受保护 API 的 JSON `401`、可信/不可信 Origin、公开分享、`/mcp`、`/memory/mcp`（PAT 认证）、`/memory` 管理页（确认/锁定/编辑/归档/删除）、Memo↔Memory 双向连接和导入导出。若启用 Cloudflare Access，它只能作为额外 policy，客户端仍必须提供 FlareMo 应用层 session 或 PAT。
 
 ## v0.6.0
 

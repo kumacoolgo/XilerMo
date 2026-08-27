@@ -360,19 +360,27 @@ test("loads notes beyond the first page", async ({ page }) => {
 
 test("shows the installed version and safe update fallback", async ({
   page,
+  request,
 }) => {
+  // Resolve the version from the same API the UI renders, so a release bump
+  // does not silently break this UI contract check.
+  const health = await (
+    await request.get(`${E2E_BASE_URL}/api/app/health`)
+  ).json<{ version: string }>();
+  const version = `v${health.version}`;
+
   await page.goto("/");
 
   const updateButton = page.getByRole("button", {
     name: /system update|系统更新/i,
   });
   await expect(updateButton).toBeVisible();
-  await expect(updateButton).toContainText("v0.6.0");
+  await expect(updateButton).toContainText(version);
   await updateButton.click();
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("v0.6.0");
+  await expect(dialog).toContainText(version);
   await expect(
     dialog.getByRole("link", { name: /update guide|升级指南/i }),
   ).toHaveAttribute("href", /docs\/update\.md$/);
@@ -404,17 +412,50 @@ test("creates, follows, reads, and removes memo relations", async ({
     .fill(targetContent);
   await page.getByRole("button", { name: targetContent }).click();
   const outgoing = page.getByRole("heading", {
-    name: /related notes|关联记录/i,
+    name: /references|引用了谁/i,
   });
   await expect(
     outgoing
       .locator("..")
       .getByRole("link", { name: new RegExp(targetContent) }),
   ).toBeVisible();
+  // The inline review panel on the content tab surfaces outgoing links
+  // without opening the management tab.
+  await page.getByRole("tab", { name: /content|内容/i }).click();
+  await expect(
+    outgoing
+      .locator("..")
+      .getByRole("link", { name: new RegExp(targetContent) }),
+  ).toBeVisible();
+  // The related-notes panel ranks the directly linked note first.
+  const related = page.getByRole("heading", {
+    name: /related notes|相关笔记/i,
+  });
+  await expect(
+    related
+      .locator("..")
+      .getByRole("link", { name: new RegExp(targetContent) }),
+  ).toBeVisible();
 
   await page.goto(`/memo/${target.id}`);
+  // Backlinks are also visible inline on the target note's content tab,
+  // alongside the related-notes panel.
+  await expect(
+    page
+      .getByRole("heading", { name: /referenced by|被谁引用/i })
+      .locator("..")
+      .getByRole("link", { name: new RegExp(sourceContent) }),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByRole("heading", { name: /related notes|相关笔记/i })
+      .locator("..")
+      .getByRole("link", { name: new RegExp(sourceContent) }),
+  ).toBeVisible();
   await page.getByRole("tab", { name: /links|关联/i }).click();
-  const backlinks = page.getByRole("heading", { name: /backlinks|反向链接/i });
+  const backlinks = page.getByRole("heading", {
+    name: /referenced by|被谁引用/i,
+  });
   await expect(
     backlinks
       .locator("..")

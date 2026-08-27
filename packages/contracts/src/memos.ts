@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  exportMemoryRelationSchema,
+  exportMemoryResourceLinkSchema,
+  exportMemoryRevisionSchema,
+  importMemorySchema,
+  memoryDtoSchema,
+} from "./memory";
 import { memoSearchScopes } from "./search-query";
 
 export const memoVisibilitySchema = z.enum(["private", "protected", "public"]);
@@ -83,6 +90,33 @@ export const listMemosQuerySchema = z.object({
 export const memoStatsQuerySchema = z.object({
   time_zone: z.string().trim().min(1).max(100).default("UTC"),
 });
+
+export const dailyReviewQuerySchema = z.object({
+  /** Local date in YYYY-MM-DD; the server matches creation month-day. */
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  /** Minutes the viewer's local time is ahead of UTC (e.g. 480 for UTC+8). */
+  tzOffset: z.coerce.number().int().min(-840).max(840).default(0),
+});
+
+export const randomMemoQuerySchema = z.object({
+  /** Comma-separated memo resource names already walked through. */
+  exclude: z.string().trim().max(64_000).optional(),
+});
+
+export const walkNextQuerySchema = z.object({
+  memoId: z.string().trim().min(1).max(200),
+  exclude: z.string().trim().max(64_000).optional(),
+});
+
+export const relatedMemosQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(10).default(5),
+});
+
+export const reviewWalkViaSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("tag"), tag: z.string() }),
+  z.object({ type: z.literal("relation") }),
+  z.object({ type: z.literal("jump") }),
+]);
 
 export const attachmentDtoSchema = z.object({
   name: z.string(),
@@ -231,6 +265,7 @@ export const memoContextResponseSchema = z.object({
   relations: z.array(memoRelationContextSchema),
   backlinks: z.array(memoRelationContextSchema),
   revisions: z.array(memoRevisionDtoSchema),
+  memories: z.array(memoryDtoSchema),
 });
 
 export const publicShareDtoSchema = z.object({
@@ -256,7 +291,7 @@ const importShareSchema = shareDtoSchema.partial({
 });
 
 export const importBundleSchema = z.object({
-  version: z.union([z.literal(1), z.literal(2)]).default(1),
+  version: z.union([z.literal(1), z.literal(2), z.literal(3)]).default(1),
   memos: z
     .array(
       memoDtoSchema
@@ -282,6 +317,19 @@ export const importBundleSchema = z.object({
   attachments: z.array(importAttachmentSchema).max(5_000).default([]),
   relations: z.array(memoRelationDtoSchema).max(100_000).default([]),
   shares: z.array(importShareSchema).max(10_000).default([]),
+  memories: z.array(importMemorySchema).max(50_000).default([]),
+  memory_revisions: z
+    .array(exportMemoryRevisionSchema)
+    .max(200_000)
+    .default([]),
+  memory_relations: z
+    .array(exportMemoryRelationSchema)
+    .max(100_000)
+    .default([]),
+  memory_resource_links: z
+    .array(exportMemoryResourceLinkSchema)
+    .max(100_000)
+    .default([]),
   exported_at: z.string().optional(),
 });
 
@@ -296,6 +344,7 @@ export const importResultSchema = z.object({
   imported_attachments: z.number().int().nonnegative(),
   imported_relations: z.number().int().nonnegative(),
   imported_shares: z.number().int().nonnegative(),
+  imported_memories: z.number().int().nonnegative().default(0),
 });
 
 export const dataTaskStatusSchema = z.enum([
@@ -393,6 +442,24 @@ export const deleteTagResponseSchema = z.object({
   removed: z.number().int().nonnegative(),
 });
 
+export const listNotificationsQuerySchema = z.object({
+  page_size: z.coerce.number().int().min(1).max(100).default(50),
+  page_token: z.string().optional(),
+});
+
+export const updateNotificationSchema = z.object({
+  status: z.enum(["unread", "archived"]),
+});
+
+export const appNotificationDtoSchema = z.object({
+  name: z.string(),
+  type: z.enum(["memo_comment", "memo_mention", "daily_review"]),
+  status: z.enum(["unread", "archived"]),
+  memo: z.string(),
+  memo_snippet: z.string(),
+  create_time: z.string(),
+});
+
 export type CreateMemoInput = z.infer<typeof createMemoSchema>;
 export type UpdateMemoInput = z.infer<typeof updateMemoSchema>;
 export type ListMemosQuery = z.infer<typeof listMemosQuerySchema>;
@@ -403,6 +470,31 @@ export type MemoOrderBy = z.infer<typeof memoOrderBySchema>;
 export type MemoDto = z.infer<typeof memoDtoSchema>;
 export type ListMemosResponse = z.infer<typeof listMemosResponseSchema>;
 export type MemoStatsResponse = z.infer<typeof memoStatsResponseSchema>;
+export type DailyReviewQuery = z.infer<typeof dailyReviewQuerySchema>;
+export type RandomMemoQuery = z.infer<typeof randomMemoQuerySchema>;
+export type WalkNextQuery = z.infer<typeof walkNextQuerySchema>;
+export type RelatedMemosQuery = z.infer<typeof relatedMemosQuerySchema>;
+export type ReviewWalkVia = z.infer<typeof reviewWalkViaSchema>;
+export type DailyReviewResponse = { memos: MemoDto[] };
+export type RandomMemoResponse = { memo: MemoDto | null };
+export type WalkNextResponse = {
+  memo: MemoDto | null;
+  via: ReviewWalkVia | null;
+};
+export type RelatedMemoEntry = MemoDto & {
+  shared_tags: string[];
+  via_relation: boolean;
+};
+export type RelatedMemosResponse = { memos: RelatedMemoEntry[] };
+export type ListNotificationsQuery = z.infer<
+  typeof listNotificationsQuerySchema
+>;
+export type UpdateNotificationInput = z.infer<typeof updateNotificationSchema>;
+export type AppNotificationDto = z.infer<typeof appNotificationDtoSchema>;
+export type ListAppNotificationsResponse = {
+  notifications: AppNotificationDto[];
+  next_page_token?: string;
+};
 export type AttachmentDto = z.infer<typeof attachmentDtoSchema>;
 export type ListAttachmentsQuery = z.infer<typeof listAttachmentsQuerySchema>;
 export type BindMemoAttachmentsInput = z.infer<

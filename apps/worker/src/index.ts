@@ -4,7 +4,9 @@ import {
 } from "@flaremo/contracts";
 import { createDb } from "@flaremo/db";
 import {
+  createDailyReviewNotifications,
   deleteExpiredDataTasks,
+  dispatchEmbeddingOutbox,
   dispatchMemosWebhookOutbox,
   expireStaleDataTasks,
   finalizeAttachmentCleanup,
@@ -18,12 +20,16 @@ import {
   getRequestContext,
   type HonoBindings,
 } from "./context";
+import { createEmbeddingProvider, createVectorIndex } from "./embedding";
 import type { FlareMoEnv } from "./env";
 import { jsonError } from "./http";
 import { accountApi } from "./routes/account-api";
+import { adminApi } from "./routes/admin-api";
 import { appApi } from "./routes/app-api";
 import { authApi } from "./routes/auth-api";
 import { mcpApi, mcpStreamableApi } from "./routes/mcp";
+import { memoryApi } from "./routes/memory-api";
+import { memoryMcpApi } from "./routes/memory-mcp";
 import { memosApi } from "./routes/memos-api";
 import { memosConnectApi } from "./routes/memos-connect-api";
 import {
@@ -33,7 +39,9 @@ import {
 import { memosFileApi } from "./routes/memos-file-api";
 import { memosSocialApi } from "./routes/memos-social-api";
 import { memosSseApi } from "./routes/memos-sse";
+import { projectsApi } from "./routes/projects-api";
 import { publicApi } from "./routes/public-api";
+import { tasksApi } from "./routes/tasks-api";
 
 const app = new Hono<HonoBindings>();
 
@@ -121,10 +129,15 @@ app.use("/api/auth/*", async (c, next) => {
 app.route("/api/auth/flaremo", authApi);
 app.all("/api/auth/*", (c) => createFlareMoAuth(c.env).handler(c.req.raw));
 app.route("/api/app/account", accountApi);
+app.route("/api/app/admin", adminApi);
+app.route("/api/app/memory", memoryApi);
+app.route("/api/app/projects", projectsApi);
+app.route("/api/app/tasks", tasksApi);
 app.route("/api/app", appApi);
 app.route("/api/public", publicApi);
 app.route("/file", memosFileApi);
 app.route("/mcp", mcpStreamableApi);
+app.route("/memory/mcp", memoryMcpApi);
 app.route("/", memosConnectApi);
 app.route("/", memosSseApi);
 app.route("/api/v1", memosSocialApi);
@@ -165,10 +178,22 @@ const handler = {
     ctx?.waitUntil(
       dispatchMemosWebhookOutbox(createDb(env.DB)).catch(() => undefined),
     );
+    ctx?.waitUntil(
+      dispatchEmbeddingOutbox(createDb(env.DB), {
+        provider: createEmbeddingProvider(env),
+        memosIndex: createVectorIndex(env, "memo"),
+        memoriesIndex: createVectorIndex(env, "memory"),
+      }).catch(() => undefined),
+    );
     return response;
   },
   async scheduled(controller: ScheduledController, env: FlareMoEnv) {
     await dispatchMemosWebhookOutbox(createDb(env.DB));
+    await dispatchEmbeddingOutbox(createDb(env.DB), {
+      provider: createEmbeddingProvider(env),
+      memosIndex: createVectorIndex(env, "memo"),
+      memoriesIndex: createVectorIndex(env, "memory"),
+    });
     const db = createDb(env.DB);
     const cutoff = new Date(
       controller.scheduledTime - 24 * 60 * 60 * 1_000,
@@ -196,12 +221,22 @@ const handler = {
         cursor = listing.truncated ? listing.cursor : undefined;
       } while (cursor);
     }
+    // Daily review reach-out: file one idempotent inbox row per user when the
+    // UTC calendar day has "on this day" history. The source-event unique
+    // index absorbs cron retries, so a repeat run for the same date is a no-op.
+    const reviewDate = new Date(controller.scheduledTime)
+      .toISOString()
+      .slice(0, 10);
+    const reviewNotificationCount = await createDailyReviewNotifications(db, {
+      date: reviewDate,
+    });
     console.log(
       JSON.stringify({
         message: "attachment cleanup complete",
         count: candidates.length,
         staleTaskCount: staleCount,
         expiredTaskCount: expiredIds.length,
+        reviewNotificationCount,
         scheduledTime: controller.scheduledTime,
       }),
     );

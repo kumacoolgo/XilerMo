@@ -25,6 +25,7 @@ import {
   MenuIcon,
   SearchIcon,
   SettingsIcon,
+  SparklesIcon,
   UploadIcon,
 } from "lucide-react";
 import {
@@ -58,6 +59,7 @@ import {
   type MemoStatsResponse,
   renameTag,
   type Share,
+  semanticSearchMemos,
   trashMemo,
   updateMemo,
   uploadAttachment,
@@ -67,6 +69,7 @@ import { FlareMoExplorer } from "@/components/flaremo-explorer";
 import type { MemoView as ViewMode } from "@/components/flaremo-sidebar";
 import { MemoComposer } from "@/components/memo-composer";
 import { MemoList } from "@/components/memo-list";
+import { NotificationBell } from "@/components/notification-bell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -105,6 +108,21 @@ const LoginPage = lazy(() =>
     default: module.LoginPage,
   })),
 );
+const RegisterPage = lazy(() =>
+  import("@/pages/register-page").then((module) => ({
+    default: module.RegisterPage,
+  })),
+);
+const ResetPage = lazy(() =>
+  import("@/pages/reset-page").then((module) => ({
+    default: module.ResetPage,
+  })),
+);
+const RecoverPage = lazy(() =>
+  import("@/pages/recover-page").then((module) => ({
+    default: module.RecoverPage,
+  })),
+);
 const SetupPage = lazy(() =>
   import("@/pages/setup-page").then((module) => ({
     default: module.SetupPage,
@@ -113,6 +131,26 @@ const SetupPage = lazy(() =>
 const AccountPage = lazy(() =>
   import("@/pages/account-page").then((module) => ({
     default: module.AccountPage,
+  })),
+);
+const DailyReviewPage = lazy(() =>
+  import("@/pages/daily-review-page").then((module) => ({
+    default: module.DailyReviewPage,
+  })),
+);
+const RandomWalkPage = lazy(() =>
+  import("@/pages/random-walk-page").then((module) => ({
+    default: module.RandomWalkPage,
+  })),
+);
+const MemoryPage = lazy(() =>
+  import("@/pages/memory-page").then((module) => ({
+    default: module.MemoryPage,
+  })),
+);
+const ProjectsPage = lazy(() =>
+  import("@/pages/projects-page").then((module) => ({
+    default: module.ProjectsPage,
   })),
 );
 
@@ -182,6 +220,19 @@ function FlareMoApp() {
     useState(false);
   const debouncedQuery = useDebouncedValue(query.trim(), 250);
   const isSearching = Boolean(debouncedQuery);
+  const [semanticMode, setSemanticMode] = useState(false);
+
+  const semanticResultsQuery = useQuery({
+    queryKey: ["semantic-search", debouncedQuery],
+    enabled: semanticMode && Boolean(debouncedQuery),
+    queryFn: () => semanticSearchMemos(debouncedQuery, 20),
+    retry: false,
+  });
+  const semanticMemos = useMemo(
+    () => semanticResultsQuery.data?.memos ?? [],
+    [semanticResultsQuery.data],
+  );
+  const semanticDegraded = semanticResultsQuery.data?.degraded ?? false;
 
   useEffect(() => {
     const focusSearch = () => {
@@ -512,6 +563,7 @@ function FlareMoApp() {
   const handleImportFile = async (bundle: unknown) => {
     try {
       const { task, result } = await createImportTask({ bundle });
+      toast.success(t("toast.importStarted"));
       if (task.status !== "succeeded") {
         toast.error(
           t("toast.importFailed", {
@@ -537,6 +589,7 @@ function FlareMoApp() {
       ) {
         return task;
       }
+      toast(t("toast.taskPending"), { id: "data-task-pending" });
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   };
@@ -547,6 +600,7 @@ function FlareMoApp() {
       activeView={view}
       headerAction={
         <div className="mr-8 flex items-center gap-1 lg:mr-0">
+          <NotificationBell />
           <UpdateStatus />
           <Button
             asChild
@@ -683,7 +737,9 @@ function FlareMoApp() {
               <SearchBox
                 className="hidden w-[243px] md:block"
                 inputRef={desktopSearchRef}
+                onToggleSemantic={() => setSemanticMode((value) => !value)}
                 query={query}
+                semanticMode={semanticMode}
                 showShortcut
                 setQuery={setQuery}
                 t={t}
@@ -699,7 +755,9 @@ function FlareMoApp() {
             <SearchBox
               className="mb-3 md:hidden motion-safe:animate-rise"
               inputRef={mobileSearchRef}
+              onToggleSemantic={() => setSemanticMode((value) => !value)}
               query={query}
+              semanticMode={semanticMode}
               setQuery={setQuery}
               t={t}
             />
@@ -740,22 +798,40 @@ function FlareMoApp() {
                   </button>
                 </div>
               )}
-              {query.trim() && (
+              {query.trim() && !semanticMode && (
                 <p className="-mt-1 text-xs text-muted-foreground">
                   {t("search.syntaxHint")}
                 </p>
               )}
+              {semanticMode && query.trim() && !semanticDegraded && (
+                <p className="-mt-1 text-xs text-muted-foreground">
+                  {t("search.semanticEmpty")}
+                </p>
+              )}
               <MemoList
                 attachmentsByMemo={attachmentsByMemo}
-                hasError={memosQuery.isError}
-                hasNextPage={Boolean(memosQuery.hasNextPage)}
-                isFetchingNextPage={memosQuery.isFetchingNextPage}
-                isLoading={memosQuery.isLoading}
-                memos={memos}
+                hasError={
+                  semanticMode
+                    ? semanticResultsQuery.isError
+                    : memosQuery.isError
+                }
+                hasNextPage={
+                  semanticMode ? false : Boolean(memosQuery.hasNextPage)
+                }
+                isFetchingNextPage={
+                  semanticMode ? false : memosQuery.isFetchingNextPage
+                }
+                isLoading={
+                  semanticMode
+                    ? semanticResultsQuery.isLoading
+                    : memosQuery.isLoading
+                }
+                memos={semanticMode ? semanticMemos : memos}
                 searchQuery={debouncedQuery || undefined}
                 sharesByMemo={sharesByMemo}
                 onArchive={(id) => {
-                  const memo = memos.find(
+                  const source = semanticMode ? semanticMemos : memos;
+                  const memo = source.find(
                     (item) => item.name === id || item.id === id,
                   );
                   updateMutation.mutate({
@@ -769,12 +845,17 @@ function FlareMoApp() {
                 onHardDelete={async (id) => {
                   await hardDeleteMutation.mutateAsync(id);
                 }}
-                onLoadMore={() => void memosQuery.fetchNextPage()}
+                onLoadMore={() => {
+                  if (!semanticMode) void memosQuery.fetchNextPage();
+                }}
                 onPin={(id, pinned) =>
                   updateMutation.mutate({ id, input: { pinned } })
                 }
                 onRestore={(id) => restoreMutation.mutate(id)}
-                onRetry={() => void memosQuery.refetch()}
+                onRetry={() => {
+                  if (semanticMode) void semanticResultsQuery.refetch();
+                  else void memosQuery.refetch();
+                }}
                 onShare={(id) => shareMutation.mutate(id)}
                 onTagClick={setActiveTag}
                 onTrash={(id) => trashMutation.mutate(id)}
@@ -795,6 +876,8 @@ function SearchBox({
   inputRef,
   query,
   showShortcut = false,
+  semanticMode = false,
+  onToggleSemantic,
   setQuery,
   t,
 }: {
@@ -802,6 +885,8 @@ function SearchBox({
   inputRef?: RefObject<HTMLInputElement | null>;
   query: string;
   showShortcut?: boolean;
+  semanticMode?: boolean;
+  onToggleSemantic?: () => void;
   setQuery: (value: string) => void;
   t: (key: TranslationKey) => string;
 }) {
@@ -812,12 +897,33 @@ function SearchBox({
         <Input
           aria-label={t("common.search")}
           className="h-9 rounded-xl border-0 bg-muted pr-11 pl-9 shadow-none transition-[box-shadow,background-color] focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-flame-400/30"
-          placeholder={t("search.placeholder")}
+          placeholder={
+            semanticMode
+              ? t("search.semanticPlaceholder")
+              : t("search.placeholder")
+          }
           ref={inputRef}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
-        {showShortcut && (
+        {onToggleSemantic && (
+          <button
+            aria-label={t("search.semanticToggle")}
+            aria-pressed={semanticMode}
+            className={cn(
+              "absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 transition-colors",
+              semanticMode
+                ? "bg-flame-500/15 text-flame-500"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            title={t("search.semanticToggle")}
+            type="button"
+            onClick={onToggleSemantic}
+          >
+            <SparklesIcon className="size-4" />
+          </button>
+        )}
+        {showShortcut && !onToggleSemantic && (
           <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-md border bg-card px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-xs">
             ⌘K
           </kbd>
@@ -1045,6 +1151,52 @@ const loginRoute = createRoute({
   component: LoginRoutePage,
 });
 
+function RegisterRoutePage() {
+  return (
+    <Suspense fallback={<RouteLoading />}>
+      <RegisterPage />
+    </Suspense>
+  );
+}
+
+const registerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/register",
+  component: RegisterRoutePage,
+});
+
+function ResetRoutePage() {
+  const { token } = resetRoute.useSearch();
+  return (
+    <Suspense fallback={<RouteLoading />}>
+      <ResetPage token={token} />
+    </Suspense>
+  );
+}
+
+const resetRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/reset",
+  component: ResetRoutePage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    token: typeof search.token === "string" ? search.token : undefined,
+  }),
+});
+
+function RecoverRoutePage() {
+  return (
+    <Suspense fallback={<RouteLoading />}>
+      <RecoverPage />
+    </Suspense>
+  );
+}
+
+const recoverRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/recover",
+  component: RecoverRoutePage,
+});
+
 function SetupRoutePage() {
   return (
     <Suspense fallback={<RouteLoading />}>
@@ -1073,6 +1225,70 @@ const accountRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/account",
   component: AccountRoutePage,
+});
+
+function DailyReviewRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <DailyReviewPage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const dailyReviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/review/daily",
+  component: DailyReviewRoutePage,
+});
+
+function RandomWalkRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <RandomWalkPage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const randomWalkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/review/walk",
+  component: RandomWalkRoutePage,
+});
+
+function MemoryRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <MemoryPage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const memoryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/memory",
+  component: MemoryRoutePage,
+});
+
+function ProjectsRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <ProjectsPage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const projectsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects",
+  component: ProjectsRoutePage,
 });
 
 function AuthenticatedRoute({ children }: { children: ReactNode }) {
@@ -1141,8 +1357,15 @@ const router = createRouter({
     memoRoute,
     shareRoute,
     loginRoute,
+    registerRoute,
+    resetRoute,
+    recoverRoute,
     setupRoute,
     accountRoute,
+    dailyReviewRoute,
+    randomWalkRoute,
+    memoryRoute,
+    projectsRoute,
   ]),
   scrollRestoration: true,
 });

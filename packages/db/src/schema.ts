@@ -216,6 +216,16 @@ export const memos = sqliteTable(
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     deletedAt: text("deleted_at"),
+    // Semantic-search index state. D1 stays the source of truth; the Vectorize
+    // index is a rebuildable derived index keyed to embedding_version.
+    embeddingStatus: text("embedding_status", {
+      enum: ["not_indexed", "pending", "indexed", "error"],
+    })
+      .notNull()
+      .default("not_indexed"),
+    embeddingVersion: text("embedding_version"),
+    embeddedAt: text("embedded_at"),
+    embeddingError: text("embedding_error"),
   },
   (table) => [
     index("memos_user_status_pinned_created_id_idx").on(
@@ -496,7 +506,9 @@ export const memosNotifications = sqliteTable(
     senderId: text("sender_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
-    type: text("type", { enum: ["memo_comment", "memo_mention"] }).notNull(),
+    type: text("type", {
+      enum: ["memo_comment", "memo_mention", "daily_review"],
+    }).notNull(),
     status: text("status", { enum: ["unread", "archived"] })
       .notNull()
       .default("unread"),
@@ -657,6 +669,375 @@ export const dataTasks = sqliteTable(
   ],
 );
 
+// Agent Memory keeps AI-contributed long-term knowledge separate from the
+// user's memo timeline. Each memory is an atomic conclusion (see
+// docs/product-requirements.md and the Agent Memory design); long-form content
+// belongs in a memo, and a memory's `content` only stores the conclusion.
+// D1 remains the single source of truth: FTS and any future embedding index
+// are derived and rebuildable from these rows.
+export const memoryItems = sqliteTable(
+  "memory_items",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    type: text("type", {
+      enum: ["semantic", "episodic", "procedural"],
+    })
+      .notNull()
+      .default("semantic"),
+    kind: text("kind", {
+      enum: [
+        "preference",
+        "fact",
+        "decision",
+        "constraint",
+        "entity",
+        "event",
+        "outcome",
+        "lesson",
+        "procedure",
+      ],
+    })
+      .notNull()
+      .default("fact"),
+    scopeType: text("scope_type", {
+      enum: ["global", "workspace", "project", "agent"],
+    })
+      .notNull()
+      .default("global"),
+    scopeKey: text("scope_key"),
+    tier: text("tier", { enum: ["core", "normal"] })
+      .notNull()
+      .default("normal"),
+    verification: text("verification", {
+      enum: ["inferred", "observed", "confirmed", "locked"],
+    })
+      .notNull()
+      .default("observed"),
+    status: text("status", {
+      enum: ["active", "superseded", "disputed", "archived", "deleted"],
+    })
+      .notNull()
+      .default("active"),
+    importance: integer("importance").notNull().default(50),
+    confidence: integer("confidence").notNull().default(50),
+    needsReview: integer("needs_review", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    reviewReason: text("review_reason"),
+    createdByType: text("created_by_type", { enum: ["user", "agent"] })
+      .notNull()
+      .default("agent"),
+    sourceAgent: text("source_agent"),
+    sourceSession: text("source_session"),
+    sourceRef: text("source_ref"),
+    validFrom: text("valid_from"),
+    validTo: text("valid_to"),
+    // Normalized content + type + kind + scope hash, used to reject exact
+    // duplicates without an embedding index.
+    fingerprint: text("fingerprint").notNull(),
+    accessCount: integer("access_count").notNull().default(0),
+    lastAccessedAt: text("last_accessed_at"),
+    // Reserved for the optional P1 embedding layer. P0 keeps these at
+    // `not_indexed` and never touches a vector binding.
+    embeddingStatus: text("embedding_status", {
+      enum: ["not_indexed", "pending", "indexed", "error"],
+    })
+      .notNull()
+      .default("not_indexed"),
+    embeddingVersion: text("embedding_version"),
+    embeddedAt: text("embedded_at"),
+    embeddingError: text("embedding_error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    deletedAt: text("deleted_at"),
+  },
+  (table) => [
+    index("memory_items_user_scope_status_idx").on(
+      table.userId,
+      table.scopeType,
+      table.scopeKey,
+      table.status,
+    ),
+    index("memory_items_user_type_kind_idx").on(
+      table.userId,
+      table.type,
+      table.kind,
+    ),
+    index("memory_items_user_tier_idx").on(table.userId, table.tier),
+    uniqueIndex("memory_items_user_fingerprint_idx").on(
+      table.userId,
+      table.fingerprint,
+    ),
+  ],
+);
+
+export const memoryRevisions = sqliteTable(
+  "memory_revisions",
+  {
+    id: text("id").primaryKey(),
+    memoryId: text("memory_id")
+      .notNull()
+      .references(() => memoryItems.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    metadataSnapshot: text("metadata_snapshot", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdByType: text("created_by_type", {
+      enum: ["user", "agent"],
+    }).notNull(),
+    createdByAgent: text("created_by_agent"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("memory_revisions_memory_created_idx").on(
+      table.memoryId,
+      table.createdAt,
+    ),
+    index("memory_revisions_user_created_idx").on(
+      table.userId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const memoryRelations = sqliteTable(
+  "memory_relations",
+  {
+    id: text("id").primaryKey(),
+    memoryId: text("memory_id")
+      .notNull()
+      .references(() => memoryItems.id, { onDelete: "cascade" }),
+    relatedMemoryId: text("related_memory_id")
+      .notNull()
+      .references(() => memoryItems.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    type: text("type", {
+      enum: [
+        "related_to",
+        "supports",
+        "contradicts",
+        "supersedes",
+        "depends_on",
+        "part_of",
+      ],
+    })
+      .notNull()
+      .default("related_to"),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("memory_relations_memory_related_type_idx").on(
+      table.memoryId,
+      table.relatedMemoryId,
+      table.type,
+    ),
+    index("memory_relations_related_idx").on(table.relatedMemoryId, table.type),
+  ],
+);
+
+export const memoryResourceLinks = sqliteTable(
+  "memory_resource_links",
+  {
+    id: text("id").primaryKey(),
+    memoryId: text("memory_id")
+      .notNull()
+      .references(() => memoryItems.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", {
+      enum: ["memo", "session", "github", "url", "document", "other"],
+    }).notNull(),
+    resourceRef: text("resource_ref").notNull(),
+    relationType: text("relation_type", {
+      enum: ["derived_from", "evidence", "references", "promoted_to"],
+    })
+      .notNull()
+      .default("derived_from"),
+    metadata: text("metadata", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("memory_resource_links_memory_idx").on(table.memoryId),
+    index("memory_resource_links_resource_idx").on(
+      table.resourceType,
+      table.resourceRef,
+    ),
+  ],
+);
+
+// The semantic-search outbox. A row is enqueued atomically alongside the D1
+// write that needs indexing; a scheduled sweep claims, embeds, and upserts or
+// deletes the matching Vectorize vectors. Mirrors the webhook outbox's
+// lease/claim/backoff shape so a crash mid-sweep can be reclaimed safely.
+export const embeddingTasks = sqliteTable(
+  "embedding_tasks",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type", { enum: ["memo", "memory"] }).notNull(),
+    resourceId: text("resource_id").notNull(),
+    operation: text("operation", {
+      enum: ["index", "reindex", "delete"],
+    }).notNull(),
+    status: text("status", {
+      enum: ["pending", "running", "succeeded", "dead"],
+    })
+      .notNull()
+      .default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: text("next_attempt_at"),
+    leaseUntil: text("lease_until"),
+    lastError: text("last_error"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("embedding_tasks_status_next_idx").on(
+      table.status,
+      table.nextAttemptAt,
+    ),
+    index("embedding_tasks_resource_idx").on(
+      table.resourceType,
+      table.resourceId,
+    ),
+  ],
+);
+
+// A month-bucketed usage counter for semantic search. Stored dimensions come
+// from the Vectorize index `describe()`; this table tracks what we actively
+// consume (query dimensions, embedding calls, and embedded tokens).
+export const usageCounters = sqliteTable(
+  "usage_counters",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    month: text("month").notNull(),
+    metric: text("metric", {
+      enum: ["queried_dims", "embedding_tokens", "embedding_calls"],
+    }).notNull(),
+    count: integer("count").notNull().default(0),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("usage_counters_user_month_metric_idx").on(
+      table.userId,
+      table.month,
+      table.metric,
+    ),
+  ],
+);
+
+// Projects group tasks. They are first-class domain resources (not memo tags)
+// so agents and scripts can read a stable "what projects do I have, how many
+// tasks in each" through the app API without re-parsing memo markdown.
+export const projects = sqliteTable(
+  "projects",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    status: text("status", { enum: ["active", "archived"] })
+      .notNull()
+      .default("active"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("projects_user_status_created_idx").on(
+      table.userId,
+      table.status,
+      table.createdAt,
+    ),
+  ],
+);
+
+// Tasks are thin, ordered work items under a project. `status` and `sort_order`
+// are columns (not a JSON payload) so list/board grouping stays indexable.
+export const tasks = sqliteTable(
+  "tasks",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    notes: text("notes"),
+    status: text("status", { enum: ["todo", "in_progress", "done"] })
+      .notNull()
+      .default("todo"),
+    priority: text("priority", { enum: ["none", "low", "medium", "high"] })
+      .notNull()
+      .default("none"),
+    dueAt: text("due_at"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    completedAt: text("completed_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    index("tasks_user_project_status_sort_idx").on(
+      table.userId,
+      table.projectId,
+      table.status,
+      table.sortOrder,
+    ),
+    index("tasks_user_due_idx").on(table.userId, table.dueAt),
+  ],
+);
+
+// An append-only audit trail per task mutation. Agents get full write access,
+// so observability (who changed what, when) is what makes that trustable and
+// reversible rather than gating the agent's permissions. `task_id` is null for
+// project-scoped events (e.g. reorders) that do not target a single task.
+export const taskActivity = sqliteTable(
+  "task_activity",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    taskId: text("task_id").references(() => tasks.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    actorType: text("actor_type", { enum: ["user", "agent"] }).notNull(),
+    actorName: text("actor_name"),
+    action: text("action", {
+      enum: ["created", "updated", "status_changed", "deleted", "reordered"],
+    }).notNull(),
+    changes: text("changes", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [
+    index("task_activity_task_created_idx").on(table.taskId, table.createdAt),
+    index("task_activity_user_created_idx").on(table.userId, table.createdAt),
+  ],
+);
+
 export type MemoPayload = {
   tags?: string[];
   property?: {
@@ -691,3 +1072,18 @@ export type AttachmentRow = typeof attachments.$inferSelect;
 export type ShareRow = typeof shares.$inferSelect;
 export type DataTaskRow = typeof dataTasks.$inferSelect;
 export type NewDataTaskRow = typeof dataTasks.$inferInsert;
+export type MemoryItemRow = typeof memoryItems.$inferSelect;
+export type NewMemoryItemRow = typeof memoryItems.$inferInsert;
+export type MemoryRevisionRow = typeof memoryRevisions.$inferSelect;
+export type MemoryRelationRow = typeof memoryRelations.$inferSelect;
+export type MemoryResourceLinkRow = typeof memoryResourceLinks.$inferSelect;
+export type EmbeddingTaskRow = typeof embeddingTasks.$inferSelect;
+export type NewEmbeddingTaskRow = typeof embeddingTasks.$inferInsert;
+export type UsageCounterRow = typeof usageCounters.$inferSelect;
+export type NewUsageCounterRow = typeof usageCounters.$inferInsert;
+export type ProjectRow = typeof projects.$inferSelect;
+export type NewProjectRow = typeof projects.$inferInsert;
+export type TaskRow = typeof tasks.$inferSelect;
+export type NewTaskRow = typeof tasks.$inferInsert;
+export type TaskActivityRow = typeof taskActivity.$inferSelect;
+export type NewTaskActivityRow = typeof taskActivity.$inferInsert;
