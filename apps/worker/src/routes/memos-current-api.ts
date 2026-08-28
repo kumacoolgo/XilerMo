@@ -1,5 +1,7 @@
 import { createDb, type UserRow } from "@flaremo/db";
 import {
+  assertAttachmentStorageQuota,
+  assertMemberQuota,
   bindMemoAttachments,
   createAttachmentMetadata,
   createFlaremoMemberWithLink,
@@ -33,6 +35,7 @@ import {
   replaceMemoRelations,
   revokeAuthSessionByToken,
   revokeMemoShare,
+  SELF_HOST_UNLIMITED,
   updateMemo,
 } from "@flaremo/domain";
 import {
@@ -50,6 +53,7 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "../attachment-http";
 import { createFlareMoAuth } from "../auth";
+import { verifyCaptchaRequest } from "../captcha";
 import {
   assertTrustedCookieMutation,
   getOptionalRequestContext,
@@ -246,9 +250,16 @@ memosCurrentApi.post("/auth/signup", async (c, next) => {
     assertTrustedCookieMutation(c);
     const input = currentSignupSchema.parse(await c.req.json());
     await assertRegistrationOpen(c);
+    await verifyCaptchaRequest(c.env, c.req.raw);
     const username = input.username.trim();
     const email = input.email?.trim() || `${username}@flaremo.local`;
     const dbContext = await createAuthContext(c);
+    // Pre-check before the Better Auth identity exists so a spent member
+    // quota cannot orphan an auth user.
+    await assertMemberQuota(
+      dbContext.db,
+      c.get("planLimits") ?? SELF_HOST_UNLIMITED,
+    );
     const auth = createFlareMoAuth(c.env, dbContext.db, {
       allowBootstrapSignUp: true,
     });
@@ -261,11 +272,15 @@ memosCurrentApi.post("/auth/signup", async (c, next) => {
         displayUsername: username,
       },
     });
-    const user = await createFlaremoMemberWithLink(dbContext.db, {
-      authUserId: result.user.id,
-      email,
-      name: input.displayName?.trim() || username,
-    });
+    const user = await createFlaremoMemberWithLink(
+      dbContext.db,
+      {
+        authUserId: result.user.id,
+        email,
+        name: input.displayName?.trim() || username,
+      },
+      c.get("planLimits") ?? SELF_HOST_UNLIMITED,
+    );
     const nativeTokens = await issueMemosNativeTokens({
       db: dbContext.db,
       env: c.env,
@@ -479,12 +494,17 @@ memosCurrentApi.post("/memos", async (c, next) => {
       throw new ValidationCurrentError("Memo content is required");
     }
     const context = await getRequestContext(c);
-    const memo = await createMemo(context.db, context.user, {
-      content: body.content.trim(),
-      visibility: currentVisibilityToLegacy(body.visibility),
-      payload: currentPayload(body),
-      source: "memos-api",
-    });
+    const memo = await createMemo(
+      context.db,
+      context.user,
+      {
+        content: body.content.trim(),
+        visibility: currentVisibilityToLegacy(body.visibility),
+        payload: currentPayload(body),
+        source: "memos-api",
+      },
+      { userLimits: context.userLimits, userId: context.user.id },
+    );
     return c.json(await currentMemoWithDetails(context, memo));
   } catch (error) {
     return currentJsonError(c, error);
@@ -749,6 +769,12 @@ memosCurrentApi.post("/attachments", async (c, next) => {
       );
     }
     const context = await getRequestContext(c);
+    await assertAttachmentStorageQuota(
+      context.db,
+      context.limits,
+      bytes.byteLength,
+      { userLimits: context.userLimits, userId: context.user.id },
+    );
     const objectKey = createAttachmentObjectKey(
       context.user.id,
       filename,
@@ -876,6 +902,7 @@ memosCurrentApi.post("/users", async (c, next) => {
     const body = currentSignupSchema.parse(await c.req.json());
     const username = body.username.trim();
     const email = `${username}@flaremo.local`;
+    await assertMemberQuota(context.db, context.limits);
     const auth = createFlareMoAuth(c.env, context.db, {
       allowBootstrapSignUp: true,
     });
@@ -888,11 +915,15 @@ memosCurrentApi.post("/users", async (c, next) => {
         displayUsername: username,
       },
     });
-    const user = await createFlaremoMemberWithLink(context.db, {
-      authUserId: result.user.id,
-      email,
-      name: body.displayName?.trim() || username,
-    });
+    const user = await createFlaremoMemberWithLink(
+      context.db,
+      {
+        authUserId: result.user.id,
+        email,
+        name: body.displayName?.trim() || username,
+      },
+      context.limits,
+    );
     return c.json(
       await currentUserForContext({
         db: context.db,
@@ -1511,6 +1542,7 @@ function currentErrorCode(status: number) {
   if (status === 404) return 5;
   if (status === 409) return 6;
   if (status === 413) return 8;
+  if (status === 429) return 8;
   return 13;
 }
 

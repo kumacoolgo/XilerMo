@@ -2,6 +2,7 @@ import { FLAREMO_API_VERSION } from "@flaremo/contracts";
 import type { UserRow } from "@flaremo/db";
 import { createDb } from "@flaremo/db";
 import {
+  assertAttachmentStorageQuota,
   bindMemoAttachments,
   compileAttachmentFilter,
   createAttachmentMetadata,
@@ -50,9 +51,11 @@ import {
   listUserWebhooks,
   markAttachmentDeleting,
   markMemoAttachmentsDeleting,
+  type PlanLimits,
   replaceMemoRelations,
   revokeAuthSessionByToken,
   revokeMemoShare,
+  SELF_HOST_UNLIMITED,
   type UserNotificationDto,
   updateAttachmentMemo,
   updateFlaremoUserProfile,
@@ -81,6 +84,7 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "../attachment-http";
 import { createFlareMoAuth } from "../auth";
+import { verifyCaptchaRequest } from "../captcha";
 import {
   assertRequestCredentialBoundary,
   assertTrustedCookieMutation,
@@ -578,6 +582,12 @@ async function createConnectAttachment(
   if (bytes.byteLength > MAX_ATTACHMENT_BYTES) {
     throw new ConnectInputError("Attachment exceeds the 25 MiB limit");
   }
+  await assertAttachmentStorageQuota(
+    context.db,
+    context.limits,
+    bytes.byteLength,
+    { userLimits: context.userLimits, userId: context.user.id },
+  );
   const objectKey = createAttachmentObjectKey(
     context.user.id,
     filename,
@@ -697,12 +707,17 @@ async function connectUserMethod(
         optionalString(user.nickname) ??
         username;
       const email = `${username}@flaremo.local`;
-      const created = await createConnectUser(c, context.db, {
-        username,
-        password,
-        displayName,
-        email,
-      });
+      const created = await createConnectUser(
+        c,
+        context.db,
+        {
+          username,
+          password,
+          displayName,
+          email,
+        },
+        context.limits,
+      );
       return connectValue(c, created.dto, transport);
     }
     case "DeleteUser": {
@@ -1662,12 +1677,17 @@ async function createConnectMemo(
 ) {
   const body = record(value);
   const memo = record(body.memo);
-  const created = await createMemo(context.db, context.user, {
-    content: requiredString(memo.content, "memo.content"),
-    visibility: visibilityToLegacy(memo.visibility),
-    payload: currentPayload(memo),
-    source: "memos-connect",
-  });
+  const created = await createMemo(
+    context.db,
+    context.user,
+    {
+      content: requiredString(memo.content, "memo.content"),
+      visibility: visibilityToLegacy(memo.visibility),
+      payload: currentPayload(memo),
+      source: "memos-connect",
+    },
+    { userLimits: context.userLimits, userId: context.user.id },
+  );
   return connectMemoWithDetails(context, created.id);
 }
 
@@ -2062,6 +2082,8 @@ async function getPublicInstanceContext(
     bearerSession: false,
     nativeAccessToken: false,
     session: null,
+    limits: SELF_HOST_UNLIMITED,
+    userLimits: null,
   };
 }
 
@@ -2679,7 +2701,7 @@ function connectError(
   c: ConnectContext,
   code: string,
   message: string,
-  status: 400 | 401 | 403 | 404 | 409 | 415 | 500 | 501,
+  status: 400 | 401 | 403 | 404 | 409 | 415 | 429 | 500 | 501,
 ) {
   return c.json({ code, message }, status, {
     "content-type": "application/json",
@@ -2817,6 +2839,7 @@ async function createConnectUser(
     displayName: string;
     email: string;
   },
+  limits: PlanLimits,
 ) {
   const auth = createFlareMoAuth(c.env, db, {
     allowBootstrapSignUp: true,
@@ -2830,11 +2853,15 @@ async function createConnectUser(
       displayUsername: input.username,
     },
   });
-  const user = await createFlaremoMemberWithLink(db, {
-    authUserId: result.user.id,
-    email: input.email,
-    name: input.displayName,
-  });
+  const user = await createFlaremoMemberWithLink(
+    db,
+    {
+      authUserId: result.user.id,
+      email: input.email,
+      name: input.displayName,
+    },
+    limits,
+  );
   return {
     authUserId: result.user.id,
     user,
@@ -2881,13 +2908,19 @@ async function connectAuthSignUp(
       );
     }
 
+    await verifyCaptchaRequest(c.env, c.req.raw);
     const email = optionalString(body.email) ?? `${username}@flaremo.local`;
-    const { authUserId, user, dto } = await createConnectUser(c, db, {
-      username,
-      password,
-      displayName,
-      email,
-    });
+    const { authUserId, user, dto } = await createConnectUser(
+      c,
+      db,
+      {
+        username,
+        password,
+        displayName,
+        email,
+      },
+      c.get("planLimits") ?? SELF_HOST_UNLIMITED,
+    );
     const nativeTokens = await issueMemosNativeTokens({
       db,
       env: c.env,
@@ -2924,7 +2957,11 @@ function connectDomainError(c: ConnectContext, error: unknown) {
       c,
       domainCode(status),
       error.message,
-      status === 401 || status === 403 || status === 404 || status === 409
+      status === 401 ||
+        status === 403 ||
+        status === 404 ||
+        status === 409 ||
+        status === 429
         ? status
         : status >= 500
           ? 500
@@ -2949,6 +2986,7 @@ function domainCode(status: number) {
   if (status === 403) return "permission_denied";
   if (status === 404) return "not_found";
   if (status === 409) return "already_exists";
+  if (status === 429) return "resource_exhausted";
   return "invalid_argument";
 }
 

@@ -2,6 +2,94 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## v0.12.0
+
+按条计费与注册防护版本。共享 SaaS 实例的免费档主货币从字节换成条数（`maxMemosPerUser` / `maxMemoryItemsPerUser`），并新增厂商中立的注册验证码 seam（`none` / `http` / `tencent`），为公开注册铺路。
+
+### 新增能力
+
+- Per-user 存量条数限额（#115）：`UserPlanLimits` 新增 `maxMemosPerUser`（memo 按 normal+archived 计，回收站不算）与 `maxMemoryItemsPerUser`（memory 按 active+archived 计）。检查在 domain `createMemo` / `createMemory` 内部（`QuotaScope` 沿 checkpoint / createMemoryFromMemo / promoteMemoryToMemo 透传），全部 9 条创建路由 + 两条导入路径（按 bundle 条数预检）已接线。恰好满额允许、超出 429；`plan.user` 段与账户面板新增「笔记条数 / Agent 记忆条数」两行。
+- `parseUserPlanLimits` 放宽：缺键解析为 null（回落到部署级限额），仅当载荷无任何有效键才视为未配置——null 从不等于 unlimited。
+- 注册验证码 seam（#116）：`FLAREMO_CAPTCHA_PROVIDER` = `none`（默认）/ `http`（POST {ticket,randstr,ip} 到 `FLAREMO_CAPTCHA_VERIFY_URL`，任意平台可经此接入）/ `tencent`（腾讯云验证码 2.0，TC3-HMAC-SHA256 签名调 DescribeCaptchaResult，国内可达）。site key 走变量、secret 走 Wrangler secret；配置缺失 fail-closed。覆盖 Web / Memos current signup / Connect SignUp 三条注册路径；bootstrap 与管理端建号豁免。注册页按 `/register/status` 返回的 provider 动态加载腾讯控件（懒加载）或阻塞提交直至 ticket 头存在。
+- Projects/Tasks/引用关系/回顾/导入导出/MCP 接入**不设限**（零边际成本，设限只添摩擦）。
+
+### Memos 兼容面变化
+
+- `/api/v1/*` 兼容面不变。429/403 仅在部署显式配置 per-user 条数限额或验证码时出现。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增必需资源。新增可选变量：`FLAREMO_CAPTCHA_PROVIDER` / `FLAREMO_CAPTCHA_SITE_KEY` / `FLAREMO_CAPTCHA_VERIFY_URL`；新增可选 secrets：`FLAREMO_CAPTCHA_SECRET_ID` / `FLAREMO_CAPTCHA_SECRET`（tencent 用）。
+- 启用验证码后，浏览器注册必须携带 ticket（Web 页自动处理）；无验证码配置时行为与 v0.11.0 完全一致。
+
+### 升级说明
+
+- 自托管直接 `pnpm deploy`，零配置，行为不变。
+- 公开 SaaS 实例（app.flaremo.app）建议配置 per-user 限额与验证码后再开放注册。
+
+## v0.11.0
+
+Per-user 限额版本。为「公开注册、多用户共享一个部署」的 SaaS 形态补上按用户计量的限额层：在部署级 PlanLimits 之上新增 `UserPlanLimits`（存储 / embedding tokens / 语义搜索三个维度），生效优先级 per-user → 部署级 → 不限量。自托管不配置 per-user 载荷时行为与 v0.10.0 完全一致。
+
+### 新增能力
+
+- `UserPlanLimits` 注入层（#114）：`createFlareMoApp` 新增 `resolveUserPlanLimits(env, userId)` 选项，或直接用 `FLAREMO_USER_LIMITS_JSON` 环境变量（严格解析：畸形/缺键载荷视为「未配置」，绝不部分生效成不限量）。成员数上限保持部署级，不做 per-user 形态。
+- #109 的全部执行点（上传、导入、语义搜索、memory_recall、embedding outbox）按 scope 生效：per-user 限额生效时按该用户的用量判断（`usage_counters` 本就按 user 分桶，附件存储按 userId 求和）；outbox 按任务归属用户逐任务判断，一个用户预算耗尽不影响其他用户。
+- `/api/app/usage/vector` 的 `plan` 段在配置 per-user 限额时附带 `user` 子段；账户用量面板新增「个人限额」分组（部署限额分组改名「部署限额」）。
+
+### Memos 兼容面变化
+
+- `/api/v1/*` 兼容面不变。新增的 429 仅在部署显式配置 per-user 限额且该用户超限时出现。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增 Cloudflare 资源、无必需的 secret 变化。
+- 需要按用户限额的部署：给 Worker 增加 `FLAREMO_USER_LIMITS_JSON` 变量（非 secret）；不需要则什么都不用做。
+
+### 升级说明
+
+- 自托管直接 `pnpm deploy`，无需任何步骤，行为不变。
+- 公开 SaaS 实例（app.flaremo.app）升级后建议配置 per-user 限额再继续开放注册。
+
+## v0.10.0
+
+开放内核与计划限额版本。这个版本为 SaaS 双仓架构打下地基：AGPL-3.0-only 许可证、`createFlareMoApp` 组装工厂、可注入的 `PlanLimits` 在内核四个执行点被真正执行（附件存储 / 月度 embedding tokens / 月度语义搜索 / 成员数），并新增内核导入边界架构测试。自托管部署行为完全不变（限额全 null = 不限量）；托管形态的差异化从这一版起纯粹是控制面返回的数字差异。
+
+### 新增能力
+
+- 许可证从 MIT 切换为 **AGPL-3.0-only**（#103）：全部 9 个包 SPDX 更新，README/CONTRIBUTING 写明版权人双许可权利与商标条款。
+- `createFlareMoApp(options)` 工厂（#105）：worker 路由表不再挂模块级常量，每次调用返回全新 Hono 实例；接受可选 `resolvePlanLimits(env)`，默认恒返回 `SELF_HOST_UNLIMITED`，解析结果经中间件写入 Hono Variables 并随请求上下文 `limits` 字段可用。
+- 计划限额真实执行（#109，`packages/domain/src/quotas.ts`）：
+  - 附件存储总量：三条上传路径 + 两条导入路径在写入 R2 前预检，超限返回 429；
+  - 月度 embedding tokens：outbox 每次 embed 成功后按估算 token（`ceil(chars/4)`）写入 `usage_counters`；预算耗尽时 sweep 暂停认领（任务保持 pending、不消耗重试次数，次月自动恢复）；全量重建只计量不阻断；
+  - 月度语义搜索：新增 `search_queries` 指标，`/api/app/search/semantic` 与 `memory_recall` 语义路径在 embed 前检查，超限 429；
+  - 成员数上限：Web 注册 / 管理员建号 / Memos 注册路径统一预检，注册在 Better Auth 身份创建之前预检以避免孤儿身份；429 在四套错误映射中透传。
+- `/api/app/usage/vector` 响应新增 `plan` 段（四维度 used/limit），账户用量面板渲染限额进度条（limit 为 null 不渲染）。
+- 内核导入边界架构测试（#107）：机械约束支付依赖不得进入内核、第三方导入必须注册在 workspace package、禁止非 registry 依赖声明。
+
+### 营销站与文档镜像（apps/site）
+
+- 新增 `apps/site` 包：FlareMo 官方营销站与文档镜像，部署到 `flaremo.app`，与主 Worker `flaremo` 完全解耦。
+- 技术栈与 `apps/web` 完全同构：React 19 + Vite + TanStack Router（code-based）+ Tailwind CSS 4；构建期 SSG，每个路由产出完整静态 HTML，客户端 hydrate。
+- 首页 / 定价页 / 文档镜像 / Hosted 占位 / 完整 SEO（sitemap、JSON-LD、hreflang、OG image）。
+
+### Memos 兼容面变化
+
+- `/api/v1/*` 兼容面不变；新增的 429 仅在部署显式注入限额时出现，自托管（不注入）永远不会触发。
+- 认证与 Origin 校验语义不变：cookie session 状态变更仍要求精确 Origin 匹配，PAT 请求语义不变。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增 Cloudflare 资源、无新增 env var 或 secret 要求。
+- `apps/site` 为独立 Worker `flaremo-site`，用 `pnpm deploy:site` 单独部署，不触发主 Worker。
+- Better Auth 配置不动；`FLAREMO_PUBLIC_URL` / `FLAREMO_TRUSTED_ORIGINS` 语义不变。
+
+### 升级说明
+
+- 自托管用户直接 `pnpm deploy` 即可；无需任何迁移步骤，行为与 v0.9.0 一致。
+- `pnpm release v0.10.0` 与 Deploy Button 用户仓库的升级 PR 自动消费本 Release。
+- 后续托管形态通过私有控制面组合本内核，不影响公开仓升级路径。
+
 ## v0.9.0
 
 账户邮箱自助修改版本。这个版本在无邮件基础设施的前提下，为账户设置页新增"修改邮箱"能力：修改登录邮箱前必须验证当前密码（避免裸改登录标识），改邮箱不引入邮件服务，验证步骤集中在 route 层，未来接入邮件 OTP 时可替换而不改路由契约。
