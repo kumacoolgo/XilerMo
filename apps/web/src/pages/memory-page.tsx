@@ -595,7 +595,7 @@ function MemoryCreateDialog({
             <Textarea
               rows={4}
               value={content}
-              placeholder="FlareMo 使用 D1 作为事实源"
+              placeholder="XilerMo 使用 D1 作为事实源"
               onChange={(event) => setContent(event.target.value)}
             />
           </Field>
@@ -742,7 +742,7 @@ function MemoryEditDialog({
             <Textarea
               rows={4}
               value={content}
-              placeholder="FlareMo 使用 D1 作为事实源"
+              placeholder="XilerMo 使用 D1 作为事实源"
               onChange={(event) => setContent(event.target.value)}
             />
           </Field>

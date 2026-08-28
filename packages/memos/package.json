@@ -1,6 +1,7 @@
 {
   "name": "@flaremo/memos",
-  "version": "0.9.0",
+  "license": "AGPL-3.0-only",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",

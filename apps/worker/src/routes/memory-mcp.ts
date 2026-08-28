@@ -8,9 +8,11 @@ import {
   rememberInputSchema,
 } from "@flaremo/contracts";
 import {
+  assertMonthlyQuota,
   bootstrapMemory,
   checkpointMemory,
   createMemory,
+  estimateTokenCount,
   forgetMemory,
   incrementUsageCounter,
   linkMemory,
@@ -420,13 +422,34 @@ async function callMemoryTool(
       const provider = createEmbeddingProvider(c.env);
       const index = createVectorIndex(c.env, "memory");
       if (provider && index) {
+        await assertMonthlyQuota(
+          context.db,
+          context.limits.semanticSearchQueriesPerMonth,
+          "search_queries",
+          "Monthly semantic search quota exceeded",
+          { userLimits: context.userLimits, userId: context.user.id },
+        );
         c.executionCtx.waitUntil(
-          incrementUsageCounter(
-            db,
-            user,
-            "queried_dims",
-            provider.dimensions,
-          ).catch(() => undefined),
+          Promise.all([
+            incrementUsageCounter(
+              context.db,
+              context.user,
+              "queried_dims",
+              provider.dimensions,
+            ).catch(() => undefined),
+            incrementUsageCounter(
+              context.db,
+              context.user,
+              "search_queries",
+              1,
+            ).catch(() => undefined),
+            incrementUsageCounter(
+              context.db,
+              context.user,
+              "embedding_tokens",
+              estimateTokenCount([input.query]),
+            ).catch(() => undefined),
+          ]),
         );
       }
       return recallMemories(
@@ -451,12 +474,16 @@ async function callMemoryTool(
         user,
         resolveAgent(args),
         rememberInputToWrite(input),
+        { userLimits: context.userLimits, userId: user.id },
       );
       return result;
     }
     case "memory_checkpoint": {
       const input = checkpointInputSchema.parse(args);
-      return checkpointMemory(db, user, resolveAgent(args), input);
+      return checkpointMemory(db, user, resolveAgent(args), input, {
+        userLimits: context.userLimits,
+        userId: user.id,
+      });
     }
     case "memory_link": {
       const input = linkInputSchema.parse(args);

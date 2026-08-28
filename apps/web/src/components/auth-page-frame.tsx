@@ -42,7 +42,7 @@ export function AuthPageFrame({
             src="/brand/flaremo-mark-dark-320.png"
           />
           <span className="font-heading text-lg font-semibold tracking-tight text-flame-50">
-            FlareMo
+            XilerMo
           </span>
         </div>
       </aside>
