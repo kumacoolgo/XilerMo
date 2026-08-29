@@ -100,6 +100,10 @@ describe("FlareMo Worker API", () => {
       ),
       "utf8",
     );
+    const reactionsSchema = await readFile(
+      resolve(import.meta.dirname, "../../../migrations/0006_silent_kylun.sql"),
+      "utf8",
+    );
     const sseEvents = await readFile(
       resolve(
         import.meta.dirname,
@@ -136,18 +140,27 @@ describe("FlareMo Worker API", () => {
       ),
       "utf8",
     );
+    const projectsSchema = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../../migrations/0013_nosy_luke_cage.sql",
+      ),
+      "utf8",
+    );
     await applyMigration(db, migration);
     await applyMigration(db, cleanup);
     await applyMigration(db, v020);
     await applyMigration(db, offlineCapture);
     await applyMigration(db, offlineAttachments);
     await applyMigration(db, nativeAuth);
+    await applyMigration(db, reactionsSchema);
     await applyMigration(db, sseEvents);
     await applyMigration(db, userServiceParity);
     await applyMigration(db, webhookOutbox);
     await applyMigration(db, dataTasks);
     await applyMigration(db, memorySchema);
     await applyMigration(db, embeddingSchema);
+    await applyMigration(db, projectsSchema);
     sessionCookie = await bootstrapAndSignIn();
   });
 
@@ -1732,6 +1745,569 @@ describe("FlareMo Worker API", () => {
     // Provider `none` (default env): no captcha check at all.
     const openRegister = await registerWith(env, "member3@example.com");
     expect(openRegister.status).toBe(201);
+  });
+
+  it("sends a verification email on registration and verifies via token", async () => {
+    const emailApp = createFlareMoApp();
+    const open = await emailApp.fetch(
+      new Request("http://flaremo.test/api/app/admin/settings", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ registration_open: true }),
+      }),
+      env,
+    );
+    expect(open.status).toBe(200);
+
+    const emailEnv = {
+      ...env,
+      FLAREMO_EMAIL_PROVIDER: "cloudflare",
+      FLAREMO_EMAIL_FROM: "no-reply@flaremo.test",
+    } as Env;
+    const sent: Array<{ to: string; from: string; subject: string }> = [];
+    const emailBinding = {
+      send: async (msg: { to: string; from: string; subject: string }) => {
+        sent.push(msg);
+        return { ok: true };
+      },
+    };
+    const appWithEmail = createFlareMoApp();
+    const register = await appWithEmail.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/register", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          name: "Member",
+          email: "verify-me@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      { ...emailEnv, EMAIL: emailBinding } as Env,
+    );
+    expect(register.status).toBe(201);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.to).toBe("verify-me@example.com");
+    expect(sent[0]?.from).toBe("no-reply@flaremo.test");
+    expect(sent[0]?.subject).toContain("Verify");
+
+    // The token is not exposed in the response; verify the endpoint rejects
+    // an unknown token and that the status endpoint reports verification
+    // being required.
+    const status = await appWithEmail.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/register/status"),
+      { ...emailEnv, EMAIL: emailBinding } as Env,
+    );
+    const statusBody = (await status.json()) as {
+      email_verification_required: boolean;
+    };
+    expect(statusBody.email_verification_required).toBe(true);
+
+    const bad = await appWithEmail.fetch(
+      new Request(
+        "http://flaremo.test/api/auth/flaremo/verify-email?token=unknown-token",
+      ),
+      { ...emailEnv, EMAIL: emailBinding } as Env,
+    );
+    expect(bad.status).toBe(400);
+  });
+
+  it("supports resend verification, self-service reset, and verified email change", async () => {
+    const emailApp = createFlareMoApp();
+    const open = await emailApp.fetch(
+      new Request("http://flaremo.test/api/app/admin/settings", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ registration_open: true }),
+      }),
+      env,
+    );
+    expect(open.status).toBe(200);
+
+    const emailEnv = {
+      ...env,
+      FLAREMO_EMAIL_PROVIDER: "cloudflare",
+      FLAREMO_EMAIL_FROM: "no-reply@flaremo.test",
+    } as Env;
+    const sent: Array<{ to: string; subject: string; text: string }> = [];
+    const emailBinding = {
+      send: async (msg: { to: string; subject: string; text: string }) => {
+        sent.push(msg);
+        return { ok: true };
+      },
+    };
+    const appEnv = { ...emailEnv, EMAIL: emailBinding } as Env;
+
+    const register = (email: string) =>
+      emailApp.fetch(
+        new Request("http://flaremo.test/api/auth/flaremo/register", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "http://flaremo.test",
+          },
+          body: JSON.stringify({
+            name: "Member",
+            email,
+            password: TEST_PASSWORD,
+          }),
+        }),
+        appEnv,
+      );
+    expect((await register("lifecycle@example.com")).status).toBe(201);
+    expect((await register("other@example.com")).status).toBe(201);
+    expect(sent).toHaveLength(2);
+
+    // Resend hits the known unverified address only; unknown addresses and
+    // already-verified identities share the same success shape.
+    const resend = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/resend-verification", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ email: "lifecycle@example.com" }),
+      }),
+      appEnv,
+    );
+    expect(resend.status).toBe(200);
+    expect(sent).toHaveLength(3);
+    expect(sent[2]?.subject).toContain("Verify");
+
+    const resendUnknown = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/resend-verification", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ email: "nobody@example.com" }),
+      }),
+      appEnv,
+    );
+    expect(resendUnknown.status).toBe(200);
+    expect(sent).toHaveLength(3);
+
+    // Without an email provider both endpoints refuse outright.
+    const resendNone = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/resend-verification", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ email: "lifecycle@example.com" }),
+      }),
+      env,
+    );
+    expect(resendNone.status).toBe(400);
+
+    // Self-service password reset: the mail carries the one-hour token, the
+    // reset goes through Better Auth's own endpoint, and the old password
+    // stops working.
+    const forgot = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/forgot-password", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ email: "lifecycle@example.com" }),
+      }),
+      appEnv,
+    );
+    expect(forgot.status).toBe(200);
+    expect(sent).toHaveLength(4);
+    expect(sent[3]?.subject).toContain("Reset");
+
+    const forgotUnknown = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/forgot-password", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ email: "nobody@example.com" }),
+      }),
+      appEnv,
+    );
+    expect(forgotUnknown.status).toBe(200);
+    expect(sent).toHaveLength(4);
+
+    const resetToken = /reset\?token=([A-Za-z0-9-]+)/.exec(
+      sent[3]?.text ?? "",
+    )?.[1];
+    expect(resetToken).toBeDefined();
+    const reset = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/reset-password", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          newPassword: `${TEST_PASSWORD}-new`,
+          token: resetToken,
+        }),
+      }),
+      appEnv,
+    );
+    expect(reset.status).toBe(200);
+
+    const oldPassword = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "lifecycle@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      appEnv,
+    );
+    expect(oldPassword.status).toBe(401);
+    const newPassword = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "lifecycle@example.com",
+          password: `${TEST_PASSWORD}-new`,
+        }),
+      }),
+      appEnv,
+    );
+    expect(newPassword.status).toBe(200);
+
+    // Verified email change: the current password authorizes the request,
+    // the new address confirms ownership, and only then does the login
+    // identity switch.
+    const signIn = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "other@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      appEnv,
+    );
+    expect(signIn.status).toBe(200);
+    const memberCookie = extractCookieHeader(signIn);
+
+    const changeRequest = await emailApp.fetch(
+      new Request("http://flaremo.test/api/app/account/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          cookie: memberCookie,
+        },
+        body: JSON.stringify({
+          current_password: TEST_PASSWORD,
+          new_email: "changed@example.com",
+        }),
+      }),
+      appEnv,
+    );
+    expect(changeRequest.status).toBe(200);
+    const changeBody = (await changeRequest.json()) as {
+      verification_sent?: boolean;
+    };
+    expect(changeBody.verification_sent).toBe(true);
+    expect(sent).toHaveLength(5);
+    expect(sent[4]?.to).toBe("changed@example.com");
+
+    const changeToken = /verify-email-change\?token=([A-Za-z0-9-]+)/.exec(
+      sent[4]?.text ?? "",
+    )?.[1];
+    expect(changeToken).toBeDefined();
+    const confirm = await emailApp.fetch(
+      new Request(
+        `http://flaremo.test/api/auth/flaremo/verify-email-change?token=${changeToken}`,
+      ),
+      appEnv,
+    );
+    expect(confirm.status).toBe(200);
+
+    const oldEmail = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "other@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      appEnv,
+    );
+    expect(oldEmail.status).toBe(401);
+    const newEmailSignIn = await emailApp.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "changed@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      appEnv,
+    );
+    expect(newEmailSignIn.status).toBe(200);
+
+    // An in-use target address is rejected before any mail is sent.
+    const takenRequest = await emailApp.fetch(
+      new Request("http://flaremo.test/api/app/account/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          cookie: memberCookie,
+        },
+        body: JSON.stringify({
+          current_password: TEST_PASSWORD,
+          new_email: "lifecycle@example.com",
+        }),
+      }),
+      appEnv,
+    );
+    expect(takenRequest.status).toBe(400);
+    expect(sent).toHaveLength(5);
+  });
+
+  it("throttles credential endpoints when the rate limiter binding is set", async () => {
+    const keys: string[] = [];
+    const limitedEnv = {
+      ...env,
+      RATE_LIMITER: {
+        limit: async (input: { key: string }) => {
+          keys.push(input.key);
+          return { success: false };
+        },
+      },
+    } as Env;
+
+    const denied = await app.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/register", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          "cf-connecting-ip": "203.0.113.7",
+        },
+        body: JSON.stringify({
+          name: "Member",
+          email: "rate-limit@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      limitedEnv,
+    );
+    expect(denied.status).toBe(429);
+    expect(keys[0]).toBe("register:203.0.113.7");
+
+    const signInDenied = await app.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/username", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          "cf-connecting-ip": "203.0.113.7",
+        },
+        body: JSON.stringify({ username: "owner", password: TEST_PASSWORD }),
+      }),
+      limitedEnv,
+    );
+    expect(signInDenied.status).toBe(429);
+    expect(keys).toContain("auth:203.0.113.7");
+
+    // Session reads bypass the limiter entirely.
+    const sessionRead = await app.fetch(
+      new Request("http://flaremo.test/api/auth/get-session", {
+        headers: { "cf-connecting-ip": "203.0.113.7" },
+      }),
+      limitedEnv,
+    );
+    expect(sessionRead.status).toBe(200);
+    expect(keys).toHaveLength(2);
+  });
+
+  it("lets a member delete their own account after password confirmation", async () => {
+    const open = await app.fetch(
+      new Request("http://flaremo.test/api/app/admin/settings", {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          cookie: sessionCookie,
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({ registration_open: true }),
+      }),
+      env,
+    );
+    expect(open.status).toBe(200);
+
+    const register = await app.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/register", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          name: "Doomed",
+          email: "doomed@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(register.status).toBe(201);
+
+    const signIn = await app.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "doomed@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(signIn.status).toBe(200);
+    const memberCookie = extractCookieHeader(signIn);
+
+    const memo = await app.fetch(
+      new Request("http://flaremo.test/api/v1/memos", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          cookie: memberCookie,
+        },
+        body: JSON.stringify({ content: "goodbye" }),
+      }),
+      env,
+    );
+    expect(memo.status).toBe(200);
+
+    // The owner cannot self-delete through the app.
+    const ownerDelete = await app.fetch(
+      new Request("http://flaremo.test/api/app/account", {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          cookie: sessionCookie,
+        },
+        body: JSON.stringify({ current_password: TEST_PASSWORD }),
+      }),
+      env,
+    );
+    expect(ownerDelete.status).toBe(403);
+
+    // Wrong password refused; correct password deletes identity and data.
+    const wrongDelete = await app.fetch(
+      new Request("http://flaremo.test/api/app/account", {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          cookie: memberCookie,
+        },
+        body: JSON.stringify({ current_password: "wrong-password-123" }),
+      }),
+      env,
+    );
+    expect(wrongDelete.status).toBe(400);
+
+    const deleted = await app.fetch(
+      new Request("http://flaremo.test/api/app/account", {
+        method: "DELETE",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+          cookie: memberCookie,
+        },
+        body: JSON.stringify({ current_password: TEST_PASSWORD }),
+      }),
+      env,
+    );
+    expect(deleted.status).toBe(200);
+
+    const reSignIn = await app.fetch(
+      new Request("http://flaremo.test/api/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          email: "doomed@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(reSignIn.status).toBe(401);
+
+    // The member's memo is gone with the account.
+    const list = await app.fetch(
+      new Request("http://flaremo.test/api/v1/memos", {
+        headers: { cookie: memberCookie },
+      }),
+      env,
+    );
+    expect(list.status).toBe(401);
+
+    // The freed email can register again.
+    const reRegister = await app.fetch(
+      new Request("http://flaremo.test/api/auth/flaremo/register", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://flaremo.test",
+        },
+        body: JSON.stringify({
+          name: "Doomed",
+          email: "doomed@example.com",
+          password: TEST_PASSWORD,
+        }),
+      }),
+      env,
+    );
+    expect(reRegister.status).toBe(201);
   });
 
   it("rejects a registration over the member cap with 429", async () => {

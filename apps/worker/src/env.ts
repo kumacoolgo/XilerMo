@@ -1,9 +1,19 @@
+import type { RateLimiterBinding } from "./rate-limit";
+
 export type FlareMoEnv = Env & {
   BETTER_AUTH_SECRET?: string;
   FLAREMO_BOOTSTRAP_SECRET?: string;
   FLAREMO_RECOVERY_SECRET?: string;
   FLAREMO_PUBLIC_URL?: string;
   FLAREMO_TRUSTED_ORIGINS?: string;
+  // Optional Cloudflare rate-limiting binding for credential endpoints
+  // (see src/rate-limit.ts). Unbound deployments skip throttling entirely.
+  RATE_LIMITER?: RateLimiterBinding;
+  // Transactional email for registration verification (see src/email.ts).
+  // `cloudflare` uses the EMAIL binding (Workers Paid); `none` skips
+  // verification entirely (self-host default).
+  FLAREMO_EMAIL_PROVIDER?: string;
+  FLAREMO_EMAIL_FROM?: string;
   // Registration captcha (pluggable provider; see src/captcha.ts). Site key
   // is a public var; secrets are Wrangler secrets. Provider `http` requires
   // FLAREMO_CAPTCHA_VERIFY_URL; `tencent` additionally requires the secret

@@ -131,6 +131,7 @@ export const AUTHENTICATION_REQUIRED_EVENT = "flaremo:authentication-required";
 export type RegistrationStatus = {
   registration_open: boolean;
   initialized: boolean;
+  email_verification_required: boolean;
   captcha: {
     provider: "none" | "tencent" | "http";
     site_key: string | null;
@@ -569,6 +570,51 @@ export async function registerAccount(
   );
 }
 
+export async function verifyEmail(token: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/auth/flaremo/verify-email?token=${encodeURIComponent(token)}`,
+    {},
+    { authRequired: false },
+  );
+}
+
+export async function resendVerificationEmail(email: string) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/resend-verification",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function requestPasswordReset(email: string) {
+  return apiRequest<{ ok: true }>(
+    "/api/auth/flaremo/forgot-password",
+    {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    },
+    { authRequired: false },
+  );
+}
+
+export async function verifyEmailChange(token: string) {
+  return apiRequest<{ ok: true }>(
+    `/api/auth/flaremo/verify-email-change?token=${encodeURIComponent(token)}`,
+    {},
+    { authRequired: false },
+  );
+}
+
+export async function deleteAccount(currentPassword: string) {
+  return apiRequest<{ ok: true }>("/api/app/account", {
+    method: "DELETE",
+    body: JSON.stringify({ current_password: currentPassword }),
+  });
+}
+
 export async function getCurrentFlareMoUser() {
   return apiRequest<CurrentFlareMoUser>("/api/app/me");
 }
@@ -707,10 +753,13 @@ export async function changeEmail(input: {
   current_password: string;
   new_email: string;
 }) {
-  return apiRequest<{ ok: true }>("/api/app/account/email", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+  return apiRequest<{ ok: true; verification_sent?: boolean }>(
+    "/api/app/account/email",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export async function createMemo(input: CreateMemoRequest) {

@@ -155,7 +155,7 @@ const messages = {
     "detail.revokeShare": "撤销分享",
     "toast.accessRequired": "登录状态已失效，请重新登录",
     "auth.loginTitle": "登录 XilerMo",
-    "auth.forgotPasswordHint": "忘记密码？用部署时配置的恢复密钥重置。",
+    "auth.forgotPasswordHint": "忘记密码？",
     "auth.username": "用户名",
     "auth.password": "密码",
     "auth.signIn": "登录",
@@ -252,6 +252,39 @@ const messages = {
     "auth.captchaRequired": "请先完成验证码。",
     "auth.captchaVerifying": "验证码校验中…",
     "auth.captchaFailed": "验证码校验失败，请重试。",
+    "auth.verifyEmailTitle": "验证邮箱",
+    "auth.verifyEmailSent": "验证邮件已发送到",
+    "auth.verifyEmailHint": "点击邮件里的链接完成验证，然后就可以登录了。",
+    "auth.verifyEmailVerifying": "正在验证…",
+    "auth.verifyEmailSuccess": "邮箱已验证，现在可以登录了。",
+    "auth.verifyEmailInvalid": "验证链接无效或已过期，请重新注册或联系管理员。",
+    "auth.forgotPasswordTitle": "重置密码",
+    "auth.forgotPasswordDescription":
+      "输入注册邮箱，我们会发送一封包含重置链接的邮件。",
+    "auth.forgotPasswordSubmit": "发送重置链接",
+    "auth.forgotPasswordSending": "发送中…",
+    "auth.forgotPasswordSent":
+      "如果该邮箱已注册，重置邮件已发出（1 小时内有效）。请到邮箱点击链接设置新密码。",
+    "auth.forgotPasswordSelfHostHint":
+      "此部署未配置邮件服务，请使用恢复密钥重置：",
+    "auth.forgotPasswordRecoverLink": "打开恢复页面",
+    "auth.forgotPasswordFailed": "发送失败，请稍后再试。",
+    "auth.resendVerification": "重新发送验证邮件",
+    "auth.resendVerificationSending": "发送中…",
+    "auth.resendVerificationSent": "验证邮件已重新发送，请查收。",
+    "auth.emailChangeVerificationSent":
+      "确认邮件已发送到新邮箱，点击邮件里的链接后新邮箱才会生效。",
+    "auth.verifyEmailChangeTitle": "确认新邮箱",
+    "auth.deleteAccountTitle": "注销账户",
+    "auth.deleteAccountDescription":
+      "永久删除你的账户、全部笔记、附件、智能记忆、项目与配额数据，并撤销所有登录会话和访问令牌。此操作不可撤销。",
+    "auth.deleteAccountPassword": "输入当前密码确认注销",
+    "auth.deleteAccountSubmit": "永久删除我的账户",
+    "auth.deleteAccountSubmitting": "正在删除…",
+    "auth.deleteAccountFailed": "注销失败，请确认密码后重试。",
+    "auth.verifyEmailChangeSuccess": "新邮箱已生效，下次请使用新邮箱登录。",
+    "auth.verifyEmailChangeInvalid":
+      "链接无效或已过期，请到账户页重新发起修改。",
     "auth.registering": "正在注册…",
     "auth.registerFailed": "注册失败，请检查输入后重试。",
     "auth.registrationClosed": "当前未开放注册，请联系管理员。",
@@ -612,8 +645,7 @@ const messages = {
     "detail.revokeShare": "Revoke share",
     "toast.accessRequired": "Your sign-in has expired. Please sign in again.",
     "auth.loginTitle": "Sign in to XilerMo",
-    "auth.forgotPasswordHint":
-      "Forgot your password? Reset it with the recovery secret from your deployment.",
+    "auth.forgotPasswordHint": "Forgot your password?",
     "auth.username": "Username",
     "auth.password": "Password",
     "auth.signIn": "Sign in",
@@ -718,6 +750,45 @@ const messages = {
     "auth.captchaRequired": "Complete the captcha first.",
     "auth.captchaVerifying": "Verifying captcha…",
     "auth.captchaFailed": "Captcha verification failed. Try again.",
+    "auth.verifyEmailTitle": "Verify your email",
+    "auth.verifyEmailSent": "A verification email was sent to",
+    "auth.verifyEmailHint":
+      "Click the link in the email to finish verifying, then sign in.",
+    "auth.verifyEmailVerifying": "Verifying…",
+    "auth.verifyEmailSuccess": "Email verified. You can sign in now.",
+    "auth.verifyEmailInvalid":
+      "This verification link is invalid or expired. Please register again or contact the administrator.",
+    "auth.forgotPasswordTitle": "Reset your password",
+    "auth.forgotPasswordDescription":
+      "Enter your account email and we'll send you a reset link.",
+    "auth.forgotPasswordSubmit": "Send reset link",
+    "auth.forgotPasswordSending": "Sending…",
+    "auth.forgotPasswordSent":
+      "If that address is registered, a reset email is on its way. The link expires in 1 hour — click it to choose a new password.",
+    "auth.forgotPasswordSelfHostHint":
+      "This deployment has no email provider configured. Reset with the recovery key instead:",
+    "auth.forgotPasswordRecoverLink": "Open recovery page",
+    "auth.forgotPasswordFailed":
+      "Could not send the reset email. Try again later.",
+    "auth.resendVerification": "Resend verification email",
+    "auth.resendVerificationSending": "Sending…",
+    "auth.resendVerificationSent":
+      "Verification email resent. Check your inbox.",
+    "auth.emailChangeVerificationSent":
+      "A confirmation email was sent to your new address. The change takes effect after you click the link in it.",
+    "auth.verifyEmailChangeTitle": "Confirm new email",
+    "auth.deleteAccountTitle": "Delete account",
+    "auth.deleteAccountDescription":
+      "Permanently delete your account with all notes, attachments, agent memories, projects, and quota data, and revoke every session and access token. This cannot be undone.",
+    "auth.deleteAccountPassword": "Confirm with your current password",
+    "auth.deleteAccountSubmit": "Permanently delete my account",
+    "auth.deleteAccountSubmitting": "Deleting…",
+    "auth.deleteAccountFailed":
+      "Could not delete the account. Check your password and try again.",
+    "auth.verifyEmailChangeSuccess":
+      "New email confirmed. Use it to sign in from now on.",
+    "auth.verifyEmailChangeInvalid":
+      "This link is invalid or has expired. Start the change again from your account page.",
     "auth.registering": "Signing up…",
     "auth.registerFailed": "Sign-up failed. Check your input and try again.",
     "auth.registrationClosed":

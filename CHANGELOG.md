@@ -2,6 +2,60 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## v0.14.0
+
+邮件生命周期闭环 + 账号自助注销 + 可选限频版本。把 v0.13.0 引入的注册邮件验证补成完整闭环（重发、找回密码、换邮箱验证新地址），补上公开 SaaS 的合规底线（自助注销），并为凭据端点提供厂商中立的 per-IP 限频（呼应「不要验证码」的决策：不接验证码平台，用 Cloudflare 原生 rate limiting binding 防刷）。
+
+### 新增能力
+
+- 重发验证邮件（#118）：`POST /api/auth/flaremo/resend-verification`。未知地址与已验证身份返回同一成功形态（防账号枚举）；注册完成页新增「重新发送验证邮件」。
+- 自助找回密码（#118）：`POST /api/auth/flaremo/forgot-password` 发送 1 小时有效的重置邮件，链接走既有 `/reset` 页面 + Better Auth 原生 `/api/auth/reset-password`（重置成功自动撤销全部 session）。响应不区分地址是否注册。登录页「忘记密码」入口改指新 `/forgot-password` 页；自托管（无邮件 provider）在该页引导使用恢复密钥（`/recover`），原路径不变。
+- 换邮箱验证新地址（#118）：配置邮件 provider 后，改邮箱先验证当前密码 + 新地址占用（auth 与 domain 两处），向新地址发送 24h 确认邮件，点击 `/verify-email-change` 后才切换登录邮箱（auth + domain 同步）。确认前旧邮箱继续有效，打错地址不再锁死后续邮件流。provider 为 `none` 的自托管保持立即生效。
+- 账号自助注销（#124）：`DELETE /api/app/account`（当前密码确认）。domain 新增 `deleteFlaremoAccount`：逐表显式删除该用户全部 D1 数据（memos/attachments/revisions/tags/relations/reactions/shares/webhooks/notifications/shortcuts/usage counters/embedding outbox/projects/tasks/task activity/settings + Better Auth 身份/session/PAT），children-first、不依赖运行时外键级联；R2 附件对象与 Vectorize 向量（确定性 ID 枚举，幂等）同步清除，未绑定 R2/Vectorize 的部署自动跳过。owner 账号不可通过此入口注销（403）。账户页新增危险区（仅成员可见）。
+- 凭据端点可选限频（#122）：部署绑定 Cloudflare rate-limiting binding `RATE_LIMITER` 后，`/register`、`/resend-verification`、`/forgot-password` 与 Better Auth 的 sign-in/sign-up/forget-password/reset-password 路径按客户端 IP 分桶节流（超限 429）；session 读取不受影响。未绑定该 binding 的部署行为完全不变；binding 故障 fail-open（放行并记 error 日志）。
+
+### Memos 兼容面变化
+
+- 配置邮件 provider 的部署上，Memos 客户端注册路径（current `/api/v1/auth/signup`、Connect `AuthService.SignUp`）返回 403（#120）：这些兼容面无法完成邮箱验证，为防绕过闸门不再创建未验证账号。未配置 provider 的自托管行为不变。
+- 其余 `/api/v1/*` 兼容面不变。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration、无新增必需资源。
+- 新增可选 binding：`RATE_LIMITER`（rate-limiting binding，如 `namespace_id = "1001"`、`limit = 30`、`period = "60"`）。自托管默认不绑定，行为与 v0.13.0 一致。
+- 新增端点：`POST /api/auth/flaremo/resend-verification`、`POST /api/auth/flaremo/forgot-password`、`GET /api/auth/flaremo/verify-email-change`、`DELETE /api/app/account`。全部受既有 Origin allowlist 契约约束（非安全方法必须携带精确 Origin）。
+- 换邮箱语义变化（仅 provider 非 none 时）：`POST /api/app/account/email` 响应新增 `verification_sent: true`，邮箱在确认前不切换。
+
+### 升级说明
+
+- 自托管直接 `pnpm deploy`，零配置，行为不变（provider `none` 时所有新端点要么 400 要么维持原路径）。
+- 公开 SaaS / 多用户部署：建议绑定 `RATE_LIMITER`；`admin` 与 Memos current 的既有用户删除入口本次未改动（仍为 v0.13.0 语义），如需彻底删除请走新的自助注销。
+
+## v0.13.0
+
+注册邮件验证版本。公开注册的人机防线从验证码改为邮件验证（按 Kim 拍板：不要验证码，用 Cloudflare Workers Paid 计划的 Email Sending，不接第三方发信商）。
+
+### 新增能力
+
+- Email provider seam（#117）：\`FLAREMO_EMAIL_PROVIDER\` = \`none\`（默认，自托管注册行为不变）/ \`cloudflare\`（\`env.EMAIL.send()\`，Workers Paid 计划）。\`FLAREMO_EMAIL_FROM\` 指定已验证发件地址。
+- 注册流程：配置 provider 后，注册成功即 mint 单次 24h 验证 token（\`auth_verifications\`，\`email-verify:\` 命名空间，与密码重置同一机制）并发送验证邮件；发送失败返回 502（fail-closed，不产生静默未验证账号）。
+- \`GET /api/auth/flaremo/verify-email?token=\`：消费 token、置 \`auth_users.email_verified\`，单次使用（消费即删）。
+- \`/register/status\` 暴露 \`email_verification_required\`；注册页成功后显示「查收邮件」状态；新增 \`/verify-email\` 页（成功/过期两态，zh/en）。
+
+### Memos 兼容面变化
+
+- \`/api/v1/*\` 兼容面不变。邮件验证仅影响浏览器注册流程；Memos 客户端注册路径（current/Connect）暂不强制验证（后续迭代）。
+
+### Cloudflare、数据库与认证影响
+
+- 无数据库 migration。新增可选变量：\`FLAREMO_EMAIL_PROVIDER\` / \`FLAREMO_EMAIL_FROM\`；启用 \`cloudflare\` 需在 wrangler 配置 \`send_email\` binding（EMAIL）并在 Cloudflare 控制台开通 Email Sending、验证发件域名（SPF/DKIM）。
+- 未配置 provider 时行为与 v0.12.0 完全一致。
+
+### 升级说明
+
+- 自托管直接 \`pnpm deploy\`，零配置，行为不变。
+- 公开 SaaS 实例（app.flaremo.app）：开通 Email Sending + 验证域名后配置 provider 即可启用注册邮件验证。
+
 ## v0.12.0
 
 按条计费与注册防护版本。共享 SaaS 实例的免费档主货币从字节换成条数（`maxMemosPerUser` / `maxMemoryItemsPerUser`），并新增厂商中立的注册验证码 seam（`none` / `http` / `tencent`），为公开注册铺路。
