@@ -2,9 +2,146 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## v0.15.3
+
+安全与正确性修复版本：修复语义搜索/记忆召回的 namespace 透传（此前带 namespace 的向量查询必然 0 命中）、封堵管理员经密码重置接管 owner 的路径、修复 Memos 兼容 force 删除的 R2 对象泄漏，并补齐部署护栏、限流默认值与一批文档/站点修正。含一处数据库 migration（附件清理部分索引，向前兼容）。
+
+### 升级影响
+
+- **语义搜索索引布局变更**：memo 向量从「按作者 namespace」迁到单一共享 namespace（metadata 仍携带 `user_id`；查询侧由 N 次 Vectorize 查询变为 1 次，成本不随成员数增长；授权边界不变，仍然回 D1 按 `memoReadScope` 过滤）。**升级后存量向量位于旧 namespace，对新查询不可见**：等已有笔记被再次编辑时自动重建，或用重建工具（`rebuildEmbeddingIndexes`，现亦可经 owner 专用 `POST /api/app/admin/embeddings/rebuild` 触发；恢复演练同一路径）全量重排。Agent Memory 向量不受影响（保持按用户 namespace，recall 本就限定本人）。
+- 开源默认 `wrangler.jsonc` 现在绑定 `RATE_LIMITER`（登录等凭证端点的每 IP 限流默认生效）；未部署该绑定的自建配置实例不受影响（限流自动降级为不启用）。`wrangler.jsonc` 不再随仓分发，改由 `wrangler.jsonc.example` 起步。
+- 新增数据库 migration `0017_attachments_cleanup_index`，`wrangler d1 migrations apply` 即可，向前兼容。
+
+### 修复
+
+- **记忆语义召回修复（重要）**：`CloudflareVectorIndex.query` 此前把 namespace 误写成 metadata filter——Vectorize 的 `namespace` 是查询顶层选项，`filter` 匹配的是向量 metadata 字段，而没有任何向量存过名为 namespace 的字段，因此凡带 namespace 的查询必然 0 命中；同时恢复 MCP `memory_recall` 召回依赖里丢失的按用户 namespace 传参。两者叠加曾导致配置了向量索引的部署上 `memory_recall` 恒返回空列表且不回退 FTS。domain 层新增按 namespace 分区的 fake index 回归测试。
+- 记忆语义召回的降级路径现在记录服务端错误日志（原先静默吞掉一切 provider/index 失败）。
+- 团队管理员无法再通过密码重置接口触碰 owner，且非 owner 会话不能重置其他管理员的密码（与角色变更/成员移除一致的接管防护）。
+- Memos 兼容 API 的 force 删除改走统一的硬删除助手：先处理附件再删行，R2 对象不再永久泄漏（Web/Memos/MCP 三条硬删除路径收敛为同一实现）。
+- 语义搜索结果携带服务端计算的 `can_manage`，前端语义结果恢复编辑/删除操作。
+- 成员移除与自助注销的产物清理改走队列执行器（大成员体量可达百万级 vector id，不再占用请求子请求预算；未绑定队列的极简部署保持内联执行）。
+- outbox 维护巡检只在变更类请求上触发，读请求不再支付每请求 6-10 条查询的固定税；后台任务失败改为记录服务端日志（原先静默 `.catch(() => undefined)`）。
+- 新增 owner 专用 `POST /api/app/admin/embeddings/rebuild`：从 D1 全量重建 memo/memory 向量索引（运维恢复入口）。
+- 附件清理 cron 的候选查询补部分索引（原为全表扫描）。
+- domain 层 `sql IN ${array}` 写法统一改为 `inArray`。
+
+### 前端
+
+- App.tsx 进一步拆分（983 → 709 行）：memo mutations 与乐观更新收敛为 `use-memo-mutations`，导出/导入流程收敛为 `use-data-transfer`（纯搬移，行为不变）。
+- 打破 App.tsx ↔ router-tree.tsx 的循环 import：路由定义移入叶子模块，App 经 lazy 引用，消除潜在 TDZ 崩溃面。
+- 登录后回跳登录前目标页（`redirect` search 参数；仅接受同源相对路径，防开放重定向）。
+- 死代码清理（未使用的 getMemory/listMemoryRelations）与休眠的 eslint/prettier 第二套 lint 栈移除（web 工作区统一 biome）。
+- 测试基建：28 份测试文件各自手写的迁移清单统一为共享 `applyFlaremoMigrations`（按 drizzle journal 顺序应用全部 migration），消除清单漂移。
+
+### 站点与配置
+
+- 公开仓去除作者生产环境标识：`wrangler.jsonc` 不再入库（`.gitignore`），新增 `wrangler.jsonc.example`（占位 `database_id` 与公网 URL），README/部署文档改为 `cp` 示例起步；Deploy Button 一键流程随之移除（配置不再随仓 provision），官网 hero CTA 改指部署指南。
+- 默认 `wrangler.jsonc` 补绑 `RATE_LIMITER`：开源部署的登录限流默认生效（此前未绑该限流器的部署登录不限流）。
+- 移除官网 Pricing 页（$0 档营销页）及全部定价/层级入口——公开仓零商业痕迹。
+- README/ROADMAP/docs 过时的「未实现」声明修正（语义搜索、每日回顾、随机漫步、相关笔记均已上线）；agent-memory 文档的向量索引描述与实现对齐；maintenance.md 移除已拆除的 Workers Builds 自动部署声明。
+
+## v0.15.2
+
+稳定性与安全加固版本。全库系统性审计后的集中清偿：Memos 兼容面的错误信息收敛与隐私收紧、登录限流补齐、列表查询批量化、请求级实例复用、团队模式验收测试补齐，以及前端大文件的结构拆分。无数据库 migration、无 Cloudflare 资源变化。
+
+### 安全与隐私
+
+- 错误信息不再泄露内部细节：Memos 兼容层（current/social/Connect）与 MCP 工具错误只透出领域级错误文案；D1 报错、TypeError 等未预期错误一律返回固定的 "Internal server error" / "Tool call failed."（服务端日志保留完整信息）。
+- 用户列表不再泄露成员邮箱：Memos 兼容面 `ListUsers`/`BatchGetUsers`/`GetUser` 与 REST `/api/v1/users(:user)` 对非本人请求改用不含 email 的公开 DTO（用户名与展示字段保留）；本人请求与管理面不受影响。
+- 匿名网络探测封堵：`GetLinkMetadata`/`BatchGetLinkMetadata`（服务端代抓任意 URL）从匿名可达改为要求登录，未认证请求返回 401。
+- 登录爆破面补齐限流：Connect `AuthService/SignIn` 与 REST `/api/v1/auth/signin` 纳入与 `/api/auth/*` 相同的每 IP 边缘限流桶（`RATE_LIMITER`）。
+- 全站统计收敛为管理能力：Memos `UserService/ListAllUserStats` 原先任何成员可触发全站逐用户统计，现要求团队管理员，且由逐用户多次查询的扇出改为两条 GROUP BY 聚合查询。
+
+### 性能与稳健性
+
+- 请求路径实例复用：Hono 应用（全部中间件与路由表）按 Worker 生命周期构建一次；Better Auth 实例与 D1 wrapper 按 isolate 缓存（`getFlareMoRuntime`），不再每请求重建；需要非默认选项的路径（bootstrap 注册等）仍按需构建。
+- Memos 原生 access token 的 subject 解析不再每请求全表扫描 `auth_user_links`（按 D1 实例短 TTL 缓存；成员移出仍然立即失效）。
+- 列表页水合批量化：兼容面 memo 列表、评论列表与公开列表的附件、表情回应改为每页两条批量查询（原先每条 memo 至少 2 次往返，pageSize 上限 1000 时单请求可达数千条 D1 查询）。
+- 语义搜索：作者 namespace 清单按实例缓存；向量候选回读下沉为 domain 函数（`getSemanticSearchMemos`），路由层不再直查 memos 表。
+- 数据导出的 base64 转换分块处理（原先逐字节字符串拼接，32MiB 级附件内存放大明显），并复用 bundle 已有附件信息去掉逐附件重复查询。
+- Cron 附件清理改单条 IN 批量更新；成员移除队列的畸形消息直接丢弃，不再毒化整批重试。
+- 内容尺寸上限下沉 domain：`createMemo`/`updateMemo` 统一强制 content ≤ 100,000 字符、payload 序列化 ≤ 100,000 字符（与 Web/MCP 路径既有 contracts 上限对齐），Memos 兼容写路径不再无上限。
+- 内联 owner 判断收敛为 domain `isOwner`。
+
+### 前端
+
+- 列表 DTO 下发服务端计算的 `can_manage`（`canEditMemo` 为唯一规则来源），前端删除手写的角色×可见性规则副本。
+- Agent Memory、通知、导出重试等 mutation 补齐失败 toast；导出重试按钮不再产生 unhandled rejection。
+- 时间线编辑与可见性切换同步失效 memo-context、memo-related 查询，详情页不再闪旧数据。
+- 修订历史与回顾 tab 补错误分支（失败不再被当成空态）。
+- 结构拆分（纯搬移、行为不变）：App.tsx 1519 → 983 行（路由树移至 `router-tree.tsx`，纯工具函数移入 lib），账户页 1107 → 397 行（五个面板组件拆至 `pages/account/`）。
+- 更新检查优先使用 `/api/app/health` 返回的 `update_repository`，fork/自部署不再指向写死的上游仓库。
+- 死代码与重复工具函数清理（formatBytes、资源名剥离、错误文案助手收敛进 lib）。
+
+### 团队模式测试
+
+- 补齐 docs/team-mode.md 验收矩阵中此前无覆盖的断言：最后一位有效管理员守卫（domain + admin API 双层）、成员移出后 PAT 失效、移除操作重放幂等且不误删团队/公开内容、旧 `protected` 数据升级转 `private`、默认关闭注册被拒、跨成员全文搜索隔离。
+
+### Memos 兼容面变化
+
+- 未认证的 `GetLinkMetadata`/`BatchGetLinkMetadata` 由 400（参数校验）变为 401（要求认证）。
+- 非本人的用户 DTO 不再包含 `email` 字段。
+- `ListAllUserStats` 需要团队管理员，成员调用返回 403。
+- 写路径新增内容尺寸上限，超限返回 400。
+- memo 列表 DTO 新增可选 `can_manage` 布尔字段，存量客户端可忽略。
+
+### 升级影响
+
+- 无数据库 migration、无 Cloudflare 资源变化；自托管直接 `pnpm deploy` 即可。
+- 若依赖未认证链接预览或成员可见全站统计的第三方 Memos 客户端，需要改为登录会话 / 管理员凭据。
+- 错误响应文案有变化但协议结构不变；依赖具体报错字符串的自动化请改按状态码判断。
+- update 检查：配置了 `FLAREMO_DEPLOY_REPOSITORY` 的部署会在健康检查返回后查询自己的仓库 release。
+
+## v0.15.1
+
+CI 部署回归修复版本。让 `pnpm deploy:preflight` 不再阻断 CI 构建环境的自动化首次部署，并合入两个依赖更新。
+
+### 修复
+
+- 自动部署环境回归修复：`pnpm deploy:preflight` 在 CI 构建环境（`CI=true`，Workers Builds / Deploy to Cloudflare）中降级为警告不阻断。自动部署环境不携带操作者 secrets，正式 secret 由部署者通过 `wrangler secret put` 配置；本地手动发布仍强制校验 `BETTER_AUTH_SECRET`。v0.15.0 中该门禁曾让一键部署新用户的首次部署必失败。
+
+### 升级影响
+
+- 自托管行为不变：本地手动 `pnpm deploy` 仍强制校验 `BETTER_AUTH_SECRET`（≥32 字符）。
+- 依赖更新：hono 4.13.5、vitest 4.1.11；`pnpm-lock.yaml` 经 `minimumReleaseAge` 供应链策略重新解析（electron-to-chromium、node-releases、obug、seroval 回落到合规版本；dev 依赖 wrangler 等随 SemVer 范围小幅前移）。
+- 无数据库 migration、无 Cloudflare 资源变化、Memos 兼容面不变。
+
+## v0.15.0
+
+团队模式版本。为多用户部署补齐团队协作闭环：owner/admin/member 角色、管理员成员管理、三档可见性权限矩阵、可重试的成员移除清理；同时发布 Worker 生命周期工厂 `createFlareMoWorker`（HTTP routes、请求后 outbox、Queue 消费与 Cron maintenance 同一入口）和灾备持久化清单，自托管配置新增两个 Queue。
+
+### 新增能力
+
+- 完整 Worker 生命周期工厂：公开导出 `createFlareMoWorker(options)`。它将同一份 `FlareMoAppOptions` 同时用于 HTTP routes、请求后的 webhook/embedding outbox、Queue 消费和 Cron maintenance；外部组合壳不再需要复制 default handler 的内部实现，也不会因只导出 `fetch` 而漏跑 durable work。
+- 团队角色与成员管理：`owner`（初始化账号，不可删除或降级）/ `admin`（团队管理员）/ `member` 三角色，成员状态 `active`/`removed`。「团队管理」界面支持查看有效成员、添加成员、设置/取消管理员、移出成员、为成员生成一次性密码重置链接。添加成员只需姓名 + 邮箱：服务端创建账号并签发 1 小时一次性激活链接（`/reset?token=…`），成员自设密码，管理员不经手也不可知晓密码；邮箱仅作唯一登录标识（不发邮件、不做邮箱验证，`FLAREMO_EMAIL_PROVIDER=none` 语义）。
+- 可见性权限矩阵：`private` 仅作者、`protected` 团队可见（有效成员只读）、`public` 全网公开（匿名只读）；管理员可管理团队与公开内容，但不能读取成员私密内容。权限判断统一收敛在 domain 层，Web、Memos-compatible API、MCP、附件、全文/语义搜索与 SSE 共用同一矩阵；语义搜索 Vectorize 只出候选，最终结果回 D1 按当前成员过滤。
+- 成员移除闭环：移出立即禁止访问并撤销全部 session、PAT 与随机分享链接；其私密笔记与附件、个人项目/任务/Agent Memory、R2 对象与 Vectorize 派生向量被删除；团队与公开内容及历史作者名保留。操作落 `member_removal_jobs`（记录操作人/阶段/尝试次数/错误，可安全重试），经 `flaremo-member-removal` Queue 异步执行，未绑定 Queue 的部署回落 scheduled maintenance 兜底，且两条路径共用同一幂等执行器。
+- 灾备持久化清单：`scripts/persistence-manifest.mjs` 是所有 D1 `sqliteTable` 的唯一分类来源。恢复演练覆盖 memo/SSE/webhook/通知、数据任务、成员移除任务、Agent Memory、用量、项目/任务等事实源表，逐表比较恢复计数，并在恢复后把 Vectorize 的 `embedding_tasks` 重建为待处理 reindex 工作。
+- 前端 hashed 静态资源（`/assets/*-hash.*`）响应加 `cache-control: public, max-age=31536000, immutable`；HTML 与应用路由维持正常 revalidation。
+- `pnpm deploy:preflight`：发布前校验 `BETTER_AUTH_SECRET` 已配置、非占位值且字符多样性足够。
+
+### Memos 兼容面变化
+
+- 多用户部署的 `protected` 语义收紧：由「任何登录用户可见」改为「同实例有效成员可见」；`private`（仅作者）与 `public`（匿名只读）语义不变，单用户部署无感知。
+- 未由兼容接口显式开启注册时，公开注册继续拒绝（默认关闭不变）。注册开关（`GET/PATCH /api/app/admin/settings`）保留为兼容端点且仅 owner 可用；团队模式下加成员走管理员接口。
+
+### Cloudflare、数据库与认证影响
+
+- D1 migration 0014–0016：`users.status` 列 + role/status 复合索引；`memos` 查询索引；`member_removal_jobs` 表。0014 同时把存量 `protected` 笔记转为 `private`（见升级说明）。
+- 自托管 wrangler 配置新增两个 Queue（producer + consumer）：`flaremo-member-removal`（max_batch_size 10 / max_retries 5）与 `flaremo-data-export`（5 / 5）。Queue 需要 Workers Paid 计划；不绑定时成员移除与数据导出仍可经 cron 兜底执行，但清理有延迟。
+- 新增管理端点（团队管理员 cookie session，受 Origin allowlist 约束）：`POST /api/app/admin/users`、`PATCH /api/app/admin/users/:id/role`、`DELETE /api/app/admin/users/:id`、`POST /api/app/admin/users/:id/reset-password`、`GET /api/app/admin/member-removal-jobs(/:id)`、`POST /api/app/admin/member-removal-jobs/:id/retry`。
+
+### 升级影响
+
+- **升级会把存量 `protected` 笔记自动改为 `private`**（0014 迁移），避免升级后旧「登录可见」内容被新团队语义意外共享；升级完成后再按需改为团队可见。`public` 笔记保持公开。
+- 自托管升级顺序：先在目标账户创建两个 Queue（`wrangler queues create flaremo-member-removal`、`wrangler queues create flaremo-data-export`）并在 wrangler.jsonc 增加 bindings，然后 `pnpm deploy`（自动应用 migration）。迁移完成后在管理员页确认成员移除任务可正常领取。
+- 既有 `owner` 自动成为团队管理员，既有成员初始化为 `active`；不允许移出或降级最后一位有效管理员。
+- 自托管 Worker 的 default export 行为不变。高级 host 若需要完整生产生命周期（含 Queue 消费），应从 `createFlareMoApp` 迁移到 `createFlareMoWorker`；前者仍保留给测试和只需路由装配的场景。
+- 灾备流程在新 Vectorize index 上恢复时，必须使用新建或明确清空的 index，再让重建 outbox 执行；不能复用旧 D1 的 `indexed` 状态作为向量存在证明。Queue 消息是可重放的 job ID，恢复 D1 后先确认 Queue 资源与 migration 状态，再放行后台清理。
+
 ## v0.14.0
 
-邮件生命周期闭环 + 账号自助注销 + 可选限频版本。把 v0.13.0 引入的注册邮件验证补成完整闭环（重发、找回密码、换邮箱验证新地址），补上公开 SaaS 的合规底线（自助注销），并为凭据端点提供厂商中立的 per-IP 限频（呼应「不要验证码」的决策：不接验证码平台，用 Cloudflare 原生 rate limiting binding 防刷）。
+邮件生命周期闭环 + 账号自助注销 + 可选限频版本。把 v0.13.0 引入的注册邮件验证补成完整闭环（重发、找回密码、换邮箱验证新地址），补上多用户部署的合规底线（自助注销），并为凭据端点提供厂商中立的 per-IP 限频（呼应「不要验证码」的决策：不接验证码平台，用 Cloudflare 原生 rate limiting binding 防刷）。
 
 ### 新增能力
 
@@ -29,7 +166,7 @@ FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 
 ### 升级说明
 
 - 自托管直接 `pnpm deploy`，零配置，行为不变（provider `none` 时所有新端点要么 400 要么维持原路径）。
-- 公开 SaaS / 多用户部署：建议绑定 `RATE_LIMITER`；`admin` 与 Memos current 的既有用户删除入口本次未改动（仍为 v0.13.0 语义），如需彻底删除请走新的自助注销。
+- 多用户部署：建议绑定 `RATE_LIMITER`；`admin` 与 Memos current 的既有用户删除入口本次未改动（仍为 v0.13.0 语义），如需彻底删除请走新的自助注销。
 
 ## v0.13.0
 
@@ -54,11 +191,11 @@ FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 
 ### 升级说明
 
 - 自托管直接 \`pnpm deploy\`，零配置，行为不变。
-- 公开 SaaS 实例（app.flaremo.app）：开通 Email Sending + 验证域名后配置 provider 即可启用注册邮件验证。
+- 多用户部署（app.flaremo.app）：开通 Email Sending + 验证域名后配置 provider 即可启用注册邮件验证。
 
 ## v0.12.0
 
-按条计费与注册防护版本。共享 SaaS 实例的免费档主货币从字节换成条数（`maxMemosPerUser` / `maxMemoryItemsPerUser`），并新增厂商中立的注册验证码 seam（`none` / `http` / `tencent`），为公开注册铺路。
+按条计费与注册防护版本。共享多用户实例的免费档主货币从字节换成条数（`maxMemosPerUser` / `maxMemoryItemsPerUser`），并新增厂商中立的注册验证码 seam（`none` / `http` / `tencent`），为公开注册铺路。
 
 ### 新增能力
 
@@ -79,11 +216,11 @@ FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 
 ### 升级说明
 
 - 自托管直接 `pnpm deploy`，零配置，行为不变。
-- 公开 SaaS 实例（app.flaremo.app）建议配置 per-user 限额与验证码后再开放注册。
+- 多用户部署（app.flaremo.app）建议配置 per-user 限额与验证码后再开放注册。
 
 ## v0.11.0
 
-Per-user 限额版本。为「公开注册、多用户共享一个部署」的 SaaS 形态补上按用户计量的限额层：在部署级 PlanLimits 之上新增 `UserPlanLimits`（存储 / embedding tokens / 语义搜索三个维度），生效优先级 per-user → 部署级 → 不限量。自托管不配置 per-user 载荷时行为与 v0.10.0 完全一致。
+Per-user 限额版本。为「公开注册、多用户共享一个部署」的形态补上按用户计量的限额层：在部署级 PlanLimits 之上新增 `UserPlanLimits`（存储 / embedding tokens / 语义搜索三个维度），生效优先级 per-user → 部署级 → 不限量。自托管不配置 per-user 载荷时行为与 v0.10.0 完全一致。
 
 ### 新增能力
 
@@ -103,11 +240,11 @@ Per-user 限额版本。为「公开注册、多用户共享一个部署」的 S
 ### 升级说明
 
 - 自托管直接 `pnpm deploy`，无需任何步骤，行为不变。
-- 公开 SaaS 实例（app.flaremo.app）升级后建议配置 per-user 限额再继续开放注册。
+- 多用户部署（app.flaremo.app）升级后建议配置 per-user 限额再继续开放注册。
 
 ## v0.10.0
 
-开放内核与计划限额版本。这个版本为 SaaS 双仓架构打下地基：AGPL-3.0-only 许可证、`createFlareMoApp` 组装工厂、可注入的 `PlanLimits` 在内核四个执行点被真正执行（附件存储 / 月度 embedding tokens / 月度语义搜索 / 成员数），并新增内核导入边界架构测试。自托管部署行为完全不变（限额全 null = 不限量）；托管形态的差异化从这一版起纯粹是控制面返回的数字差异。
+开放内核与计划限额版本。这个版本为可组合内核打下地基：AGPL-3.0-only 许可证、`createFlareMoApp` 组装工厂、可注入的 `PlanLimits` 在内核四个执行点被真正执行（附件存储 / 月度 embedding tokens / 月度语义搜索 / 成员数），并新增内核导入边界架构测试。自托管部署行为完全不变（限额全 null = 不限量）；多用户部署的差异化从这一版起纯粹是注入限额的数字差异。
 
 ### 新增能力
 
@@ -125,7 +262,7 @@ Per-user 限额版本。为「公开注册、多用户共享一个部署」的 S
 
 - 新增 `apps/site` 包：FlareMo 官方营销站与文档镜像，部署到 `flaremo.app`，与主 Worker `flaremo` 完全解耦。
 - 技术栈与 `apps/web` 完全同构：React 19 + Vite + TanStack Router（code-based）+ Tailwind CSS 4；构建期 SSG，每个路由产出完整静态 HTML，客户端 hydrate。
-- 首页 / 定价页 / 文档镜像 / Hosted 占位 / 完整 SEO（sitemap、JSON-LD、hreflang、OG image）。
+- 首页 / 定价页 / 文档镜像 / 完整 SEO（sitemap、JSON-LD、hreflang、OG image）。
 
 ### Memos 兼容面变化
 
@@ -142,7 +279,6 @@ Per-user 限额版本。为「公开注册、多用户共享一个部署」的 S
 
 - 自托管用户直接 `pnpm deploy` 即可；无需任何迁移步骤，行为与 v0.9.0 一致。
 - `pnpm release v0.10.0` 与 Deploy Button 用户仓库的升级 PR 自动消费本 Release。
-- 后续托管形态通过私有控制面组合本内核，不影响公开仓升级路径。
 
 ## v0.9.0
 

@@ -1,6 +1,6 @@
 # FlareMo 营销站与文档站 PRD
 
-> 状态：Phase 0 已实现；后续 Phase 见 [`docs/saas-roadmap.md`](./saas-roadmap.md)。
+> 状态：已实现。
 
 ## 目标
 
@@ -9,7 +9,7 @@
 1. **Marketing**：让第一次听说 FlareMo 的人 30 秒内搞懂「这是个什么、为什么用 Cloudflare、有多省钱、怎么部署」。
 2. **Docs**：把仓库 `docs/*.md` 镜像成可被搜索引擎索引的静态文档站，中英文双轨。
 
-不接管、不展示、不假设有"Hosted SaaS"。Phase 0 的核心约束是：**不改主 Worker、不动 `apps/web`、不动 Better Auth 配置**。
+不接管、不展示、不假设有"Hosted SaaS"。核心约束是：**不改主 Worker、不动 `apps/web`、不动 Better Auth 配置**。
 
 ## 范围
 
@@ -19,7 +19,6 @@
 - 定价页 `/pricing` 与 `/en/pricing`
 - 文档目录 `/docs` 与 `/en/docs`
 - 文档详情 `/docs/:slug` 与 `/en/docs/:slug`（覆盖 15 篇中文 + 4 篇英文）
-- Hosted 占位页 `/hosted` 与 `/en/hosted`（无注册功能，仅邮件订阅 UI）
 - 中英文切换（`<link rel="alternate" hreflang>` + 语言切换按钮）
 - 完整 SEO：`robots.txt`、`sitemap.xml`、JSON-LD、OG、Twitter、canonical
 - 独立 Worker `name: flaremo-site`，部署到 `flaremo.app`
@@ -27,10 +26,10 @@
 
 ### 不做
 
-- 自部署多用户 / 公开 signup（Phase 1）
-- Hosted SaaS 后端、Stripe webhook、配额中间件（Phase 2）
+- 自部署多用户 / 公开 signup
+- Hosted SaaS 后端、Stripe webhook、配额中间件
 - 文档站交互式搜索（先静态）
-- `/changelog` 镜像（Phase 3 之后）
+- `/changelog` 镜像
 - `/blog`（未定）
 
 ## 信息架构
@@ -38,22 +37,22 @@
 ### 顶部导航
 
 - Logo（home）
-- 4 项：`首页` / `定价` / `文档` / `Hosted`
+- 3 项：`首页` / `定价` / `文档`
 - GitHub 链接 + 语言切换按钮
 
 ### 首页
 
-1. **Hero**：标题「一个免费 Cloudflare 账号就能 24 小时在线的个人笔记系统」+ 双 CTA（Deploy Button 主，Hosted 试用次）
+1. **Hero**：标题「一个免费 Cloudflare 账号就能 24 小时在线的个人笔记系统」+ 单 CTA（部署指南入口）
 2. **三列 Hero stat**：D1 5GB / R2 10GB / 0 服务器
 3. **Why FlareMo**：6 张 feature 卡片（D1+R2 / Better Auth + Memos / PWA / Agent Memory / 语义搜索 / 公开分享）
 4. **为什么 Cloudflare 比 NAS 更稳**：7 行对比表
 5. **看一眼产品**：两张截图（desktop + mobile）
-6. **三档定价**：Free / Pro / Team 卡（Pro 高亮）
+6. **定价**：Free 档卡片
 7. **常见问题**：6 条 FAQ
 
 ### Pricing 页
 
-- 三卡（与首页一致但展开）
+- Free 档卡片
 - Cloudflare 免费层对照表（6 行）
 - Pricing FAQ（4 条）
 - 使用条款与隐私（3 条）
@@ -65,11 +64,9 @@
 - 中文版挂全 15 篇
 - Markdown 排版照搬 `memo-markdown` 的层级与代码块风格
 
-### Hosted 占位
 
-- Hero 卡片：「Phase 2 即将开放」
-- 邮箱订阅表单（UI 层 `onSubmit` 只 `setSubmitted(true)`，不发请求）
-- 底部时间线状态：「Phase 0 已发布 · Phase 1 进行中 · Phase 2 计划于下一季度发布」
+
+> 已移除：自部署占位页与订阅表单已从站点删除，营销站只保留自部署产品线。
 
 ## 设计语言
 
@@ -92,7 +89,7 @@
 - 英文：sentence case
 - 单位/货币：数字统一使用阿拉伯数字 + 单位，金额前加 `$`
 - 不混用「笔记/便签/memo」在 UI 文案
-- 空状态必须给下一步动作（Hosted 页里订阅成功文案即可视为 CTA 反馈）
+- 空状态必须给下一步动作
 - emoji 仅在「English coming soon」之类容错场景出现；正文不引入
 
 ## 技术栈
@@ -133,7 +130,7 @@ apps/site/
 │   │   ├── pricing.ts      ← Pricing tier + 页面文案
 │   │   └── docs-nav.ts     ← sidebar 分组元数据
 │   ├── components/         ← SiteMark / SiteNav / SiteFooter / DeployButton / LocaleSwitcher / RootLayout
-│   ├── pages/              ← 页面组件（home / pricing / hosted / docs-index / docs-detail / not-found）
+│   ├── pages/              ← 页面组件（home / pricing / docs-index / docs-detail / not-found）
 │   └── dist/site/          ← SSG 输出（html + assets + public）
 ├── vite.config.ts          ← react + tailwindcss，outDir: dist/site
 ├── tsconfig.json / tsconfig.app.json / tsconfig.node.json
@@ -188,8 +185,8 @@ pnpm deploy:site                       # 部署到 flaremo.app
 
 ## 不做
 
-- 不引入邮件订阅 endpoint（Phase 1）
-- 不接 Stripe（Phase 2）
-- 不做 `/changelog` 镜像（Phase 3）
+- 不引入邮件订阅 endpoint
+- 不接 Stripe
+- 不做 `/changelog` 镜像
 - 不复制 apps/web 的 shadcn/ui 完整套件（营销站不需要那么多组件）
 - 不动 Cloudflare Access 策略

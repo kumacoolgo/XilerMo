@@ -20,7 +20,7 @@ import {
   memoryResourceLinks,
   memoryRevisions,
 } from "@flaremo/db";
-import { and, desc, eq, or, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, type SQL, sql } from "drizzle-orm";
 import { insertEmbeddingTask } from "./embedding-outbox";
 import {
   ConflictError,
@@ -81,6 +81,8 @@ export type RecallMemoriesInput = {
 export type RecallMemoriesDeps = {
   provider: import("./embedding").EmbeddingProvider;
   index: import("./embedding").VectorIndex;
+  /** Scopes the vector query to one tenant inside a shared index. */
+  namespace?: string;
 };
 
 export type LinkMemoryInput = {
@@ -850,10 +852,10 @@ export async function recallMemories(
     eq(memoryItems.needsReview, false),
   ];
   if (input.types?.length) {
-    filters.push(sql`${memoryItems.type} IN ${input.types}`);
+    filters.push(inArray(memoryItems.type, input.types));
   }
   if (input.kinds?.length) {
-    filters.push(sql`${memoryItems.kind} IN ${input.kinds}`);
+    filters.push(inArray(memoryItems.kind, input.kinds));
   }
 
   const rows = await db
@@ -874,14 +876,22 @@ export async function recallMemories(
         const matches = await deps.index.query(
           queryVector,
           MEMORY_RECALL_CANDIDATE_LIMIT,
+          deps.namespace,
         );
         const matchedIds = new Set(matches.map((match) => match.id));
         candidates = rows.filter((row) => matchedIds.has(row.id));
         matchedBy = "semantic";
       }
-    } catch {
+    } catch (error) {
       // Semantic recall is degradable: fall back to the FTS path on any
-      // provider or index failure.
+      // provider or index failure. The failure is still logged — a silent
+      // degradation here once hid a wiring regression.
+      console.error(
+        JSON.stringify({
+          message: "Semantic memory recall failed; falling back to FTS",
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
       matchedBy = "fts";
     }
   } else {
@@ -1248,7 +1258,7 @@ export async function listMemoriesForMemo(
     .where(
       and(
         eq(memoryItems.userId, user.id),
-        sql`${memoryItems.id} IN ${memoryIds}`,
+        inArray(memoryItems.id, memoryIds),
         sql`${memoryItems.status} != 'deleted'`,
       ),
     )

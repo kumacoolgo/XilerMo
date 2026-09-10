@@ -1,31 +1,33 @@
 import { useLocation } from "@tanstack/react-router";
 import {
+  ArrowLeftRight,
+  ArrowRight,
   Bot,
-  Cloud,
-  Languages,
-  Share2,
+  Database,
+  Gift,
+  Image as ImageIcon,
+  KeyRound,
+  ServerOff,
   ShieldCheck,
-  Sparkles,
+  WifiOff,
 } from "lucide-react";
-import { DEPLOY_BUTTON_URL, DeployButton } from "@/components/deploy-button";
 import { getHomeContent } from "@/content/copy";
-import { getPricingTiers } from "@/content/pricing";
 import type { Locale } from "@/lib/seo";
 
-const ZH_HERO_LUCIDE = [Cloud, Languages, Bot];
-const EN_HERO_LUCIDE = ZH_HERO_LUCIDE;
-
-const ZH_FEATURE_LUCIDE = [Cloud, ShieldCheck, Sparkles, Bot, Sparkles, Share2];
-const EN_FEATURE_LUCIDE = ZH_FEATURE_LUCIDE;
+const HERO_STAT_ICONS = [Database, ImageIcon, ServerOff];
+const FEATURE_ICONS = [
+  ShieldCheck,
+  Gift,
+  WifiOff,
+  Bot,
+  ArrowLeftRight,
+  KeyRound,
+];
 
 export function HomePage() {
   const { pathname } = useLocation();
   const locale: Locale = pathname.startsWith("/en") ? "en-US" : "zh-CN";
   const home = getHomeContent(locale);
-  const tiers = getPricingTiers(locale);
-  const featureIcons =
-    locale === "zh-CN" ? ZH_FEATURE_LUCIDE : EN_FEATURE_LUCIDE;
-  const heroIcons = locale === "zh-CN" ? ZH_HERO_LUCIDE : EN_HERO_LUCIDE;
 
   return (
     <main>
@@ -33,32 +35,20 @@ export function HomePage() {
         locale={locale}
         eyebrow={home.heroEyebrow}
         title={home.heroTitle}
-        subtitle={home.heroSubtitle}
         primary={home.primaryCta}
-        secondary={home.secondaryCta}
-        icons={heroIcons}
+        icons={HERO_STAT_ICONS}
       />
       <Features
         heading={home.featuresHeading}
         items={home.features}
-        icons={featureIcons}
+        icons={FEATURE_ICONS}
       />
       <Comparison
         heading={home.comparisonHeading}
-        intro={home.comparisonIntro}
         rows={home.comparisonRows}
         locale={locale}
       />
-      <Screenshots
-        heading={home.screenshotsHeading}
-        caption={home.screenshotsCaption}
-      />
-      <PricingSummary
-        heading={home.pricingHeading}
-        subtitle={home.pricingSubtitle}
-        tiers={tiers}
-        locale={locale}
-      />
+      <Screenshots heading={home.screenshotsHeading} />
       <Faq heading={home.faqHeading} items={home.faqItems} />
     </main>
   );
@@ -68,18 +58,14 @@ function Hero({
   locale,
   eyebrow,
   title,
-  subtitle,
   primary,
-  secondary,
   icons,
 }: {
   locale: Locale;
   eyebrow: string;
   title: string;
-  subtitle: string;
   primary: string;
-  secondary: string;
-  icons: typeof ZH_HERO_LUCIDE;
+  icons: typeof HERO_STAT_ICONS;
 }) {
   const [Icon1, Icon2, Icon3] = icons;
   return (
@@ -90,20 +76,17 @@ function Hero({
             <span className="size-1.5 rounded-full bg-flame-500" />
             {eyebrow}
           </span>
-          <h1 className="text-balance text-4xl font-semibold tracking-tight md:text-5xl">
+          <h1 className="text-balance text-4xl font-semibold tracking-tight md:text-6xl">
             {title}
           </h1>
-          <p className="max-w-xl text-pretty text-lg leading-7 text-muted-foreground">
-            {subtitle}
-          </p>
           <div className="flex flex-wrap gap-3">
-            <DeployButton href={DEPLOY_BUTTON_URL}>{primary}</DeployButton>
-            <DeployButton
-              href={locale === "zh-CN" ? "/hosted" : "/en/hosted"}
-              variant="secondary"
+            <a
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-gradient px-5 py-2.5 text-sm font-semibold text-primary-foreground shadow-md transition-all hover:brightness-105 motion-safe:duration-200"
+              href={locale === "zh-CN" ? "/docs/deploy" : "/en/docs/deploy"}
             >
-              {secondary}
-            </DeployButton>
+              {primary}
+              <ArrowRight className="size-4" />
+            </a>
           </div>
         </div>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -155,7 +138,7 @@ function Features({
 }: {
   heading: string;
   items: Array<{ title: string; description: string }>;
-  icons: typeof ZH_FEATURE_LUCIDE;
+  icons: typeof FEATURE_ICONS;
 }) {
   return (
     <section className="border-b border-border/60 bg-background py-20">
@@ -165,7 +148,7 @@ function Features({
         </h2>
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
           {items.map((item, idx) => {
-            const Icon = icons[idx] ?? Sparkles;
+            const Icon = icons[idx] ?? Bot;
             return (
               <article
                 className="group rounded-2xl border border-border/60 bg-card p-6 shadow-xs transition-shadow hover:shadow-md"
@@ -191,24 +174,19 @@ function Features({
 
 function Comparison({
   heading,
-  intro,
   rows,
   locale,
 }: {
   heading: string;
-  intro: string;
   rows: Array<{ label: string; cloudflare: string; nas: string; vps: string }>;
   locale: Locale;
 }) {
   return (
     <section className="border-b border-border/60 bg-secondary/30 py-20">
       <div className="container-x space-y-8">
-        <header className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
-            {heading}
-          </h2>
-          <p className="max-w-2xl text-base text-muted-foreground">{intro}</p>
-        </header>
+        <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
+          {heading}
+        </h2>
         <div className="overflow-x-auto rounded-2xl border border-border/60 bg-background shadow-xs">
           <table className="w-full text-sm">
             <thead>
@@ -248,111 +226,32 @@ function Comparison({
   );
 }
 
-function Screenshots({
-  heading,
-  caption,
-}: {
-  heading: string;
-  caption: string;
-}) {
+function Screenshots({ heading }: { heading: string }) {
   return (
     <section className="border-b border-border/60 bg-background py-20">
       <div className="container-x space-y-8">
         <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
           {heading}
         </h2>
-        <p className="max-w-2xl text-base text-muted-foreground">{caption}</p>
         <div className="flex flex-wrap items-end justify-center gap-8 rounded-3xl border border-border/60 bg-gradient-to-br from-background via-background to-flame-50/30 p-8 shadow-xs">
           <img
             alt="FlareMo desktop timeline screenshot"
             className="w-full max-w-2xl rounded-2xl border border-border/60 shadow-md"
+            decoding="async"
+            height="1040"
             loading="lazy"
             src="/docs-assets/flaremo-desktop.png"
+            width="1440"
           />
           <img
             alt="FlareMo mobile timeline screenshot"
             className="w-40 rounded-2xl border border-border/60 shadow-md"
+            decoding="async"
+            height="844"
             loading="lazy"
             src="/docs-assets/flaremo-mobile.png"
+            width="390"
           />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function PricingSummary({
-  heading,
-  subtitle,
-  tiers,
-  locale,
-}: {
-  heading: string;
-  subtitle: string;
-  tiers: ReturnType<typeof getPricingTiers>;
-  locale: Locale;
-}) {
-  return (
-    <section className="border-b border-border/60 bg-secondary/30 py-20">
-      <div className="container-x space-y-10">
-        <header className="space-y-3 text-center">
-          <h2 className="text-3xl font-semibold tracking-tight md:text-4xl">
-            {heading}
-          </h2>
-          <p className="mx-auto max-w-2xl text-base text-muted-foreground">
-            {subtitle}
-          </p>
-        </header>
-        <div className="grid gap-6 md:grid-cols-3">
-          {tiers.map((tier) => (
-            <article
-              className={`flex flex-col rounded-2xl border p-6 shadow-xs transition-shadow ${
-                tier.highlight
-                  ? "border-flame-300 bg-background shadow-md"
-                  : "border-border/60 bg-background"
-              }`}
-              key={tier.id}
-            >
-              {tier.highlight ? (
-                <span className="mb-3 inline-flex w-fit items-center rounded-full bg-brand-gradient px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary-foreground">
-                  {locale === "zh-CN" ? "推荐" : "Recommended"}
-                </span>
-              ) : null}
-              <h3 className="text-lg font-semibold tracking-tight">
-                {tier.name}
-              </h3>
-              <div className="mt-1 flex items-baseline gap-1">
-                <span className="text-3xl font-semibold tracking-tight">
-                  {tier.price}
-                </span>
-                {tier.period ? (
-                  <span className="text-xs text-muted-foreground">
-                    {tier.period}
-                  </span>
-                ) : null}
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                {tier.tagline}
-              </p>
-              <ul className="mt-5 space-y-2 text-sm">
-                {tier.features.map((f) => (
-                  <li className="flex gap-2" key={f}>
-                    <ShieldCheck className="mt-0.5 size-4 shrink-0 text-flame-500" />
-                    <span>{f}</span>
-                  </li>
-                ))}
-              </ul>
-              <div className="mt-6 pt-2">
-                <DeployButton
-                  className="w-full"
-                  href={tier.ctaHref}
-                  variant={tier.ctaVariant ?? "secondary"}
-                >
-                  {tier.cta}
-                </DeployButton>
-              </div>
-            </article>
-          ))}
         </div>
       </div>
     </section>

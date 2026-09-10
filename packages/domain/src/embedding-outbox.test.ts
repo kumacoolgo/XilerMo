@@ -1,7 +1,11 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import type { UserRow } from "@flaremo/db";
-import { createDb, embeddingTasks, memoryItems, memos } from "@flaremo/db";
+import {
+  applyFlaremoMigrations,
+  createDb,
+  embeddingTasks,
+  memoryItems,
+  memos,
+} from "@flaremo/db";
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -16,7 +20,7 @@ import {
   dispatchEmbeddingOutbox,
   rebuildEmbeddingIndexes,
 } from "./embedding-outbox";
-import { SELF_HOST_UNLIMITED } from "./limits";
+import { SELF_HOST_UNLIMITED, type UserPlanLimits } from "./limits";
 import { createMemory, type MemoryActor } from "./memory";
 import { createMemo, hardDeleteMemo } from "./memos";
 import { readMonthlyUsageTotal } from "./quotas";
@@ -34,7 +38,11 @@ class FakeVectorIndex implements VectorIndex {
   lastUpsert: VectorIndexVector[] = [];
   lastDeletedIds: string[] = [];
 
-  async query(_vector: number[], _topK: number): Promise<VectorIndexMatch[]> {
+  async query(
+    _vector: number[],
+    _topK: number,
+    _namespace?: string,
+  ): Promise<VectorIndexMatch[]> {
     return [];
   }
   async upsert(vectors: VectorIndexVector[]) {
@@ -60,19 +68,6 @@ function fakeProvider(): EmbeddingProvider {
   };
 }
 
-async function applyMigration(
-  database: Awaited<ReturnType<Miniflare["getD1Database"]>>,
-  sql: string,
-) {
-  const statements = sql
-    .split("--> statement-breakpoint")
-    .map((statement) => statement.trim())
-    .filter(Boolean);
-  for (const statement of statements) {
-    await database.prepare(statement).run();
-  }
-}
-
 describe("embedding outbox", () => {
   beforeEach(async () => {
     mf = new Miniflare({
@@ -84,27 +79,7 @@ describe("embedding outbox", () => {
     });
     const database = await mf.getD1Database("DB");
     db = createDb(database);
-    const migrationNames = [
-      "0000_illegal_inhumans.sql",
-      "0001_familiar_morph.sql",
-      "0002_wooden_professor_monster.sql",
-      "0003_equal_maximus.sql",
-      "0004_complex_the_enforcers.sql",
-      "0005_confused_masque.sql",
-      "0007_flat_phil_sheldon.sql",
-      "0008_legal_scarecrow.sql",
-      "0009_neat_iron_fist.sql",
-      "0010_deep_gateway.sql",
-      "0011_daffy_ultron.sql",
-      "0012_slow_nick_fury.sql",
-    ];
-    for (const name of migrationNames) {
-      const sql = await readFile(
-        resolve(import.meta.dirname, `../../../migrations/${name}`),
-        "utf8",
-      );
-      await applyMigration(database, sql);
-    }
+    await applyFlaremoMigrations(database);
     user = await ensureSingleUser(db, {
       email: "owner@example.com",
       name: "Owner",
@@ -136,6 +111,26 @@ describe("embedding outbox", () => {
       .get();
     expect(updated?.embeddingStatus).toBe("indexed");
     expect(updated?.embeddingVersion).toBe("test-model@4");
+  });
+
+  it("stores memo vectors in the shared namespace", async () => {
+    const _memo = await createMemo(db, user, {
+      content: "租户隔离的向量",
+      visibility: "private",
+      source: "web",
+    });
+    const index = new FakeVectorIndex();
+    await dispatchEmbeddingOutbox(db, {
+      provider: fakeProvider(),
+      memosIndex: index,
+      memoriesIndex: null,
+    });
+
+    expect(index.store.size).toBe(1);
+    const [stored] = [...index.store.values()];
+    expect(stored).toBeDefined();
+    expect(stored?.namespace).toBeUndefined();
+    expect(stored?.metadata).toMatchObject({ user_id: user.id });
   });
 
   it("deletes vectors on hard delete", async () => {
@@ -359,5 +354,59 @@ describe("embedding outbox", () => {
       .where(eq(memos.id, memo.id))
       .get();
     expect(indexed?.embeddingStatus).toBe("indexed");
+  });
+
+  it("resolves the per-user budget dynamically per task owner", async () => {
+    const freeMemo = await createMemo(db, user, {
+      content: "免费用户不索引",
+      visibility: "private",
+      source: "web",
+    });
+    const pro = await createFlaremoMember(db, {
+      email: "pro@example.com",
+      name: "Pro",
+    });
+    const proMemo = await createMemo(db, pro, {
+      content: "付费用户正常索引",
+      visibility: "private",
+      source: "web",
+    });
+
+    let embedCalls = 0;
+    const provider: EmbeddingProvider = {
+      ...fakeProvider(),
+      async embed(texts) {
+        embedCalls += 1;
+        return fakeProvider().embed(texts);
+      },
+    };
+    const FREE_LIMITS = {
+      aiEmbeddingTokensPerMonth: 0,
+      attachmentStorageBytes: null,
+      semanticSearchQueriesPerMonth: null,
+      maxMemosPerUser: null,
+      maxMemoryItemsPerUser: null,
+    } satisfies UserPlanLimits;
+    const PRO_LIMITS = {
+      aiEmbeddingTokensPerMonth: null,
+      attachmentStorageBytes: null,
+      semanticSearchQueriesPerMonth: null,
+      maxMemosPerUser: null,
+      maxMemoryItemsPerUser: null,
+    } satisfies UserPlanLimits;
+    await dispatchEmbeddingOutbox(db, {
+      provider,
+      memosIndex: new FakeVectorIndex(),
+      memoriesIndex: null,
+      resolveUserLimits: (userId) =>
+        userId === pro.id ? PRO_LIMITS : FREE_LIMITS,
+    });
+
+    const rows = await db.select().from(embeddingTasks);
+    const freeRow = rows.find((row) => row.resourceId === freeMemo.id);
+    const proRow = rows.find((row) => row.resourceId === proMemo.id);
+    expect(freeRow?.status).toBe("pending");
+    expect(proRow?.status).toBe("succeeded");
+    expect(embedCalls).toBe(1);
   });
 });

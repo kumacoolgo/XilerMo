@@ -1,7 +1,7 @@
 {
   "name": "@flaremo/memos",
   "license": "AGPL-3.0-only",
-  "version": "0.14.0",
+  "version": "0.15.3",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -14,10 +14,11 @@
   },
   "dependencies": {
     "@flaremo/contracts": "workspace:*",
-    "@flaremo/db": "workspace:*"
+    "@flaremo/db": "workspace:*",
+    "@flaremo/domain": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.11"
   }
 }

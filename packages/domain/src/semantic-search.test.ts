@@ -1,7 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import type { UserRow } from "@flaremo/db";
-import { createDb, memos } from "@flaremo/db";
+import { applyFlaremoMigrations, createDb, memos } from "@flaremo/db";
 import { eq } from "drizzle-orm";
 import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -14,7 +12,7 @@ import type {
 } from "./embedding";
 import { createMemo } from "./memos";
 import { semanticSearchMemos } from "./semantic-search";
-import { ensureSingleUser } from "./users";
+import { createFlaremoMember, ensureSingleUser } from "./users";
 
 let mf: Miniflare;
 let db: ReturnType<typeof createDb>;
@@ -23,8 +21,16 @@ let user: UserRow;
 class FakeVectorIndex implements VectorIndex {
   vectors = new Map<string, VectorIndexVector>();
   matches: VectorIndexMatch[] = [];
+  lastNamespace: string | undefined;
+  namespaces: string[] = [];
 
-  async query(_vector: number[], _topK: number): Promise<VectorIndexMatch[]> {
+  async query(
+    _vector: number[],
+    _topK: number,
+    namespace?: string,
+  ): Promise<VectorIndexMatch[]> {
+    this.lastNamespace = namespace;
+    if (namespace) this.namespaces.push(namespace);
     return this.matches;
   }
   async upsert(vectors: VectorIndexVector[]) {
@@ -46,19 +52,6 @@ const provider: EmbeddingProvider = {
   },
 };
 
-async function applyMigration(
-  database: Awaited<ReturnType<Miniflare["getD1Database"]>>,
-  sql: string,
-) {
-  const statements = sql
-    .split("--> statement-breakpoint")
-    .map((statement) => statement.trim())
-    .filter(Boolean);
-  for (const statement of statements) {
-    await database.prepare(statement).run();
-  }
-}
-
 describe("semanticSearchMemos", () => {
   beforeEach(async () => {
     mf = new Miniflare({
@@ -70,27 +63,7 @@ describe("semanticSearchMemos", () => {
     });
     const database = await mf.getD1Database("DB");
     db = createDb(database);
-    const migrationNames = [
-      "0000_illegal_inhumans.sql",
-      "0001_familiar_morph.sql",
-      "0002_wooden_professor_monster.sql",
-      "0003_equal_maximus.sql",
-      "0004_complex_the_enforcers.sql",
-      "0005_confused_masque.sql",
-      "0007_flat_phil_sheldon.sql",
-      "0008_legal_scarecrow.sql",
-      "0009_neat_iron_fist.sql",
-      "0010_deep_gateway.sql",
-      "0011_daffy_ultron.sql",
-      "0012_slow_nick_fury.sql",
-    ];
-    for (const name of migrationNames) {
-      const sql = await readFile(
-        resolve(import.meta.dirname, `../../../migrations/${name}`),
-        "utf8",
-      );
-      await applyMigration(database, sql);
-    }
+    await applyFlaremoMigrations(database);
     user = await ensureSingleUser(db, {
       email: "owner@example.com",
       name: "Owner",
@@ -149,5 +122,60 @@ describe("semanticSearchMemos", () => {
       10,
     );
     expect(hits).toEqual([]);
+  });
+
+  it("scopes the vector query to the caller's namespace", async () => {
+    const a = await createMemo(db, user, {
+      content: "租户隔离测试",
+      visibility: "private",
+      source: "web",
+    });
+    const index = new FakeVectorIndex();
+    index.matches = [{ id: `${a.id}#chunks/0`, score: 0.9 }];
+
+    await semanticSearchMemos(
+      db,
+      user,
+      { provider, index, namespace: user.id },
+      "租户",
+      10,
+    );
+    expect(index.lastNamespace).toBe(user.id);
+  });
+
+  it("returns team memos but never another member's private memo", async () => {
+    const member = await createFlaremoMember(db, {
+      email: "member@example.com",
+      name: "Member",
+    });
+    const privateMemo = await createMemo(db, user, {
+      content: "owner private",
+      visibility: "private",
+      source: "web",
+    });
+    const teamMemo = await createMemo(db, user, {
+      content: "owner team",
+      visibility: "protected",
+      source: "web",
+    });
+    const index = new FakeVectorIndex();
+    index.matches = [
+      { id: `${privateMemo.id}#chunks/0`, score: 0.95 },
+      { id: `${teamMemo.id}#chunks/0`, score: 0.9 },
+    ];
+
+    const hits = await semanticSearchMemos(
+      db,
+      member,
+      { provider, index },
+      "owner",
+      10,
+    );
+
+    expect(hits).toEqual([{ id: teamMemo.id, score: 0.9 }]);
+    // Memo vectors share one namespace: a single default-namespace query
+    // covers every author.
+    expect(index.namespaces).toEqual([]);
+    expect(index.lastNamespace).toBeUndefined();
   });
 });

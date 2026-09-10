@@ -1,6 +1,8 @@
 # XilerMo
 
-**A Cloudflare-native personal knowledge system that can run all day on a free Cloudflare account. It ships with D1, R2, Better Auth native authentication, an optional Cloudflare Access outer layer, a quiet memo timeline, and a Memos-compatible API subset.**
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
+
+**A Cloudflare-native team knowledge base that runs all day on a free Cloudflare account. Use it alone and it is a quiet personal notebook; use it with a team and it becomes a shared knowledge base with roles and three visibility levels (private, team-visible, public). It ships with D1, R2, Better Auth native authentication, an optional Cloudflare Access outer layer, a quiet memo timeline, and a Memos-compatible API subset.**
 
 [![GitHub stars](https://img.shields.io/github/stars/realchendahuang/FlareMo?style=social)](https://github.com/realchendahuang/FlareMo)
 [![license](https://img.shields.io/github/license/realchendahuang/FlareMo)](./LICENSE)
@@ -9,23 +11,25 @@
 
 [中文 README](./README.md)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
-
 <p>
   <img src="./docs/assets/flaremo-desktop.png" alt="FlareMo desktop timeline" width="720">
   <img src="./docs/assets/flaremo-mobile.png" alt="FlareMo mobile timeline" width="220">
 </p>
 
-The screenshots show the current backend-backed timeline, editor, filtering, and mobile navigation. Features that are not implemented yet, such as AI review, semantic search, and messaging-app capture, are not exposed as placeholder UI.
+The screenshots show the current backend-backed timeline, editor, filtering, and mobile navigation. Features that are not implemented yet, such as messaging-app capture, are not exposed as placeholder UI.
 
 ## What It Does
 
 - Quick memo capture with tags and attachments.
 - Timeline, archive, trash, D1 FTS5 search, tag filtering, and activity heatmap. Search spans timeline and archived notes by default and supports `has:attachment`, `is:pinned`, `before:YYYY-MM-DD`, `after:YYYY-MM-DD`, and `in:timeline|archive|trash`.
+- Semantic search ("Find"): Workers AI embeddings plus a Vectorize derived index, with every hit re-checked against D1 permissions; it degrades to FTS5 keyword search when the embedding provider or index is absent. See [docs/semantic-search.md](./docs/semantic-search.md) for the boundary.
+- Daily review (`/review/daily`, this-day-in-history), random walk (`/review/walk`, tag/relation strolls with a postcard summary), and related notes on the memo detail page.
 - An installable PWA; new memo drafts are saved locally, while offline submissions (including attachments) wait in a local queue and are submitted in order when connectivity returns.
 - Markdown/GFM with image and audio attachment previews.
 - Memo detail pages with relations, backlinks, and revision restore.
 - Revocable public share links.
+- Team mode: `owner` / `admin` / `member` roles with member management. Admins add members in the Team Management page (name + email; the server issues a one-time activation link and members set their own passwords — the admin never handles or sees a password), promote or demote admins, and remove members with a retryable data cleanup that deletes private data while keeping team and public content.
+- Three visibility levels: private (author only), team-visible (read-only for active members), and public (anonymous read-only). The web UI, Memos-compatible API, MCP, attachments, search, and SSE all share one permission matrix.
 - Memos-style import and export with conflict strategies.
 - A current Memos-style camelCase/protobuf-JSON `/api/v1` subset for memos, attachments, relations, shares, social resources, the auth facade, and PAT resources; the Connect JSON/protobuf/gRPC-Web surface also covers the single-user UserService webhook CRUD/signing-secret and notification list/update/delete subset, including comment/mention payloads. The legacy snake_case wire remains available through an explicit header.
 - Chinese and English interface.
@@ -34,15 +38,11 @@ FlareMo keeps the UI honest: if a feature is not wired to the backend, it does n
 
 ## Deployment
 
-### Deploy Button
-
-Click the Deploy to Cloudflare button above. Cloudflare reads `wrangler.jsonc`, creates a Worker, provisions the required D1 and R2 bindings, and applies D1 migrations through the deploy command. Set `FLAREMO_DEPLOY_REPOSITORY` to the GitHub repository Cloudflare creates, for example `octocat/flaremo`, so the in-app update entry can open that repository's update workflow.
-
-If your Cloudflare Dashboard has not connected GitHub or GitLab yet, Cloudflare will ask you to connect a Git provider first. That OAuth step happens in Cloudflare and is separate from FlareMo's Better Auth setup; no application credential belongs in the repository.
+XilerMo keeps a deployable `wrangler.jsonc` and the one-click Cloudflare button above. You can also use either the agent-assisted or manual flow below.
 
 ### Agent Deployment
 
-Use the repository [agent deployment runbook](./docs/agent-deploy.md) with Codex, Claude Code, Cursor Agent, or another command-capable agent.
+Use the repository [agent deployment runbook](./docs/agent-deploy.md) with Codex, Claude Code, Cursor Agent, or another command-capable agent. The agent copies `wrangler.jsonc.example`, creates the D1 / R2 resources, fills in the `database_id`, applies migrations, and deploys.
 
 ### Manual Deployment
 
@@ -52,7 +52,7 @@ pnpm exec wrangler d1 create flaremo
 pnpm exec wrangler r2 bucket create flaremo-attachments
 ```
 
-Write the generated D1 `database_id` into `wrangler.jsonc`, then run:
+Review the tracked `wrangler.jsonc`, fill in the generated D1 `database_id`, and set `FLAREMO_PUBLIC_URL` to your public origin, then run:
 
 ```bash
 pnpm verify
@@ -75,7 +75,7 @@ Full deployment docs: [docs/deploy.md](./docs/deploy.md).
 
 ## Auth Boundary: Better Auth, with optional Access
 
-FlareMo's application authentication is provided by Better Auth. On the first production deployment, the operator manually enters the one-time bootstrap secret, username, display name, email, and password in the HTTPS `/setup` page to create the single owner. Public signup is disabled after bootstrap. `FLAREMO_SINGLE_USER_EMAIL` and `FLAREMO_SINGLE_USER_NAME` are legacy variables for existing `users/owner` domain metadata, not login credentials or bootstrap inputs; the setup form is authoritative. The data model leaves room for future mapped users without changing existing memo IDs.
+FlareMo's application authentication is provided by Better Auth. On the first production deployment, the operator manually enters the one-time bootstrap secret, username, display name, email, and password in the HTTPS `/setup` page to create the single owner. Public signup is disabled after bootstrap. The main team path is adding members in the Team Management page: the server issues a one-time activation link and members set their own passwords. The owner can still enable open registration as a compatibility path (off by default), letting anyone create a member account through `/register` or the Memos-compatible `signup`. `FLAREMO_SINGLE_USER_EMAIL` and `FLAREMO_SINGLE_USER_NAME` are legacy variables for existing `users/owner` domain metadata, not login credentials or bootstrap inputs; the setup form is authoritative. Team roles, visibility permissions, and member-removal semantics are documented in [docs/team-mode.md](./docs/team-mode.md). The data model leaves room for future mapped users without changing existing memo IDs.
 
 - Browser login uses an `HttpOnly`, `SameSite=Lax` cookie session.
 - Scripts, MCP, and Memos-compatible clients use a revocable `memos_pat_` Personal Access Token created by an authenticated account.
@@ -171,7 +171,7 @@ pnpm backup:drill
 pnpm release vX.Y.Z
 ```
 
-The project does not use GitHub Actions as CI or as the production deployer. Maintainers run the local release gate before publishing. Repositories created by the Deploy Button include a least-privilege workflow that only prepares upstream Release updates as pull requests; Cloudflare Workers Builds remains the deployer. See [the update guide](./docs/en/update.md).
+The project does not use GitHub Actions as CI or as the production deployer. Maintainers run the local release gate before publishing. A self-hosted deployment repository includes the least-privilege `Prepare FlareMo update` workflow that only prepares upstream Release updates as pull requests; Cloudflare Workers Builds remains the deployer for repositories connected to it. See [the update guide](./docs/en/update.md).
 
 ## Contributing
 

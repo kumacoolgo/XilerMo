@@ -2,6 +2,13 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import {
+  assertDerivedIndexesComplete,
+  buildOrderedDataRestore,
+  buildPersistenceCountsQuery,
+  RESTORE_TABLES,
+  TABLE_EXPORT_ARGS,
+} from "./persistence-manifest.mjs";
 
 const targetDatabase = requiredEnv("FLAREMO_RESTORE_DATABASE");
 const targetDatabaseId = requiredEnv("FLAREMO_RESTORE_DATABASE_ID");
@@ -15,46 +22,43 @@ const orderedDump = join(outputDir, "d1-data-ordered.sql");
 const generatedConfig = join(outputDir, "wrangler.restore-drill.jsonc");
 const reportPath = join(outputDir, "report.md");
 const objectDir = join(outputDir, "r2");
-const backupTables = [
-  "users",
-  // Restore the identity root before Better Auth's dependent records.
-  "auth_users",
-  "auth_accounts",
-  "auth_sessions",
-  "auth_apikeys",
-  "auth_verifications",
-  "auth_user_links",
-  "auth_bootstrap",
-  "memos",
-  "settings",
-  "memo_tags",
-  "memo_revisions",
-  "memo_relations",
-  "attachments",
-  "shares",
-];
-const tableArgs = backupTables.flatMap((table) => ["--table", table]);
 const steps = [];
 
 mkdirSync(objectDir, { recursive: true });
 const sourceConfig = readFileSync(resolve("wrangler.jsonc"), "utf8");
-const productionDatabaseId = sourceConfig.match(
-  /"database_id"\s*:\s*"([^"]+)"/,
-)?.[1];
-if (!productionDatabaseId) throw new Error("Could not locate production D1 id");
-const restoreConfig = sourceConfig
-  .replace(productionDatabaseId, targetDatabaseId)
-  .replace('"database_name": "flaremo"', `"database_name": "${targetDatabase}"`)
-  .replace(
-    `"bucket_name": "${sourceBucket}"`,
-    `"bucket_name": "${targetBucket}"`,
-  )
-  .replace(
-    '"./apps/worker/src/index.ts"',
-    `"${resolve("apps/worker/src/index.ts")}"`,
-  )
-  .replace('"./apps/web/dist"', `"${resolve("apps/web/dist")}"`)
-  .replace('"./migrations"', `"${resolve("migrations")}"`);
+const productionDatabaseId = findD1DatabaseId(sourceConfig);
+const restoreConfig = replaceEachExactlyOnce(sourceConfig, [
+  {
+    label: `production D1 database id "${productionDatabaseId}"`,
+    needle: productionDatabaseId,
+    replacement: targetDatabaseId,
+  },
+  {
+    label: '"database_name": "flaremo"',
+    needle: '"database_name": "flaremo"',
+    replacement: `"database_name": "${targetDatabase}"`,
+  },
+  {
+    label: `"bucket_name": "${sourceBucket}"`,
+    needle: `"bucket_name": "${sourceBucket}"`,
+    replacement: `"bucket_name": "${targetBucket}"`,
+  },
+  {
+    label: '"./apps/worker/src/index.ts"',
+    needle: '"./apps/worker/src/index.ts"',
+    replacement: `"${resolve("apps/worker/src/index.ts")}"`,
+  },
+  {
+    label: '"./apps/web/dist"',
+    needle: '"./apps/web/dist"',
+    replacement: `"${resolve("apps/web/dist")}"`,
+  },
+  {
+    label: '"./migrations"',
+    needle: '"./migrations"',
+    replacement: `"${resolve("migrations")}"`,
+  },
+]);
 writeFileSync(generatedConfig, restoreConfig);
 
 step("verify source and target resources", () => {
@@ -77,7 +81,7 @@ step("export production D1 business data", () =>
     "export",
     sourceDatabase,
     "--remote",
-    ...tableArgs,
+    ...TABLE_EXPORT_ARGS,
     "--no-schema",
     "--output",
     dataDump,
@@ -87,19 +91,7 @@ step("export production D1 business data", () =>
 
 step("order D1 inserts by foreign-key dependency", () => {
   const dump = readFileSync(dataDump, "utf8");
-  const lines = ["PRAGMA defer_foreign_keys=TRUE;"];
-  for (const table of backupTables) {
-    lines.push(
-      ...dump
-        .split("\n")
-        .filter(
-          (line) =>
-            line.startsWith(`INSERT INTO "${table}" `) ||
-            line.startsWith(`INSERT INTO \`${table}\` `),
-        ),
-    );
-  }
-  writeFileSync(orderedDump, `${lines.join("\n")}\n`);
+  writeFileSync(orderedDump, buildOrderedDataRestore(dump));
 });
 
 step("apply migrations to target D1", () =>
@@ -131,16 +123,15 @@ step("restore production D1 data to target", () =>
 const sourceCounts = queryCounts(sourceDatabase);
 const targetCounts = queryCounts("DB", generatedConfig);
 step("compare source and target D1 counts", () => {
-  for (const key of Object.keys(sourceCounts)) {
-    if (sourceCounts[key] !== targetCounts[key]) {
+  for (const table of RESTORE_TABLES) {
+    if (sourceCounts[table] !== targetCounts[table]) {
       throw new Error(
-        `${key} mismatch: source=${sourceCounts[key]} target=${targetCounts[key]}`,
+        `${table} mismatch: source=${sourceCounts[table]} target=${targetCounts[table]}`,
       );
     }
   }
-  if (targetCounts.memos !== targetCounts.fts) {
-    throw new Error("Target FTS index was not rebuilt from restored memos");
-  }
+  assertDerivedIndexesComplete(sourceCounts);
+  assertDerivedIndexesComplete(targetCounts);
 });
 
 const attachments = query(
@@ -217,29 +208,68 @@ writeFileSync(
 
 console.log(`Remote restore drill report: ${reportPath}`);
 
+// The restore config is built by literal surgery on wrangler.jsonc. Every
+// replacement must hit exactly once: a silently skipped needle would leave
+// production binding values (or the production database id) in the generated
+// config and point the drill at live resources.
+function replaceEachExactlyOnce(config, replacements) {
+  let result = config;
+  for (const { label, needle, replacement } of replacements) {
+    const start = result.indexOf(needle);
+    const repeated =
+      start !== -1 && result.indexOf(needle, start + needle.length) !== -1;
+    if (start === -1 || repeated) {
+      throw new Error(
+        `Expected exactly one occurrence of ${label} in wrangler.jsonc but found ${start === -1 ? "none" : "multiple"}; refusing to generate a restore config that might still point at production resources.`,
+      );
+    }
+    result =
+      result.slice(0, start) +
+      replacement +
+      result.slice(start + needle.length);
+  }
+  return result;
+}
+
+// Anchor on the d1_databases block instead of the first database_id anywhere
+// in the file, so other configs sharing the file cannot hijack the match.
+function findD1DatabaseId(config) {
+  const keyIndex = config.indexOf('"d1_databases"');
+  if (keyIndex === -1) {
+    throw new Error('Could not locate "d1_databases" in wrangler.jsonc');
+  }
+  const arrayStart = config.indexOf("[", keyIndex);
+  let depth = 0;
+  let arrayEnd = -1;
+  for (let index = arrayStart; index < config.length; index += 1) {
+    if (config[index] === "[") {
+      depth += 1;
+    } else if (config[index] === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        arrayEnd = index;
+        break;
+      }
+    }
+  }
+  if (arrayStart === -1 || arrayEnd === -1) {
+    throw new Error(
+      'Could not locate the "d1_databases" array in wrangler.jsonc',
+    );
+  }
+  const match = config
+    .slice(arrayStart, arrayEnd + 1)
+    .match(/"database_id"\s*:\s*"([^"]+)"/);
+  if (!match) {
+    throw new Error(
+      'Could not locate a "database_id" inside the "d1_databases" block of wrangler.jsonc',
+    );
+  }
+  return match[1];
+}
+
 function queryCounts(database, config) {
-  const rows = query(
-    database,
-    [
-      "SELECT",
-      "(SELECT COUNT(*) FROM users) AS users,",
-      "(SELECT COUNT(*) FROM auth_users) AS auth_users,",
-      "(SELECT COUNT(*) FROM auth_accounts) AS auth_accounts,",
-      "(SELECT COUNT(*) FROM auth_sessions) AS auth_sessions,",
-      "(SELECT COUNT(*) FROM auth_apikeys) AS auth_apikeys,",
-      "(SELECT COUNT(*) FROM auth_verifications) AS auth_verifications,",
-      "(SELECT COUNT(*) FROM auth_user_links) AS auth_user_links,",
-      "(SELECT COUNT(*) FROM auth_bootstrap) AS auth_bootstrap,",
-      "(SELECT COUNT(*) FROM memos) AS memos,",
-      "(SELECT COUNT(*) FROM memo_tags) AS tags,",
-      "(SELECT COUNT(*) FROM memo_revisions) AS revisions,",
-      "(SELECT COUNT(*) FROM attachments WHERE deleted_at IS NULL) AS attachments,",
-      "(SELECT COUNT(*) FROM memo_relations) AS relations,",
-      "(SELECT COUNT(*) FROM shares) AS shares,",
-      "(SELECT COUNT(*) FROM memos_fts) AS fts;",
-    ].join(" "),
-    config,
-  );
+  const rows = query(database, buildPersistenceCountsQuery(), config);
   return rows[0] ?? {};
 }
 

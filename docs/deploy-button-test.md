@@ -4,7 +4,7 @@
 
 ## 测试入口
 
-[Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/realchendahuang/FlareMo)
+[Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
 
 ## 当前结论
 
@@ -44,7 +44,7 @@ selected_r2_ATTACHMENTSR2Bucket = __create_new__
 ATTACHMENTSR2BucketName = flaremo-deploy-test-assets-20260723-1630
 FLAREMO_DEPLOY_REPOSITORY = realchendahuang/flaremo-deploy-test-20260723-1630
 FLAREMO_SINGLE_USER_EMAIL = owner@flaremo.local
-FLAREMO_SINGLE_USER_NAME = FlareMo Owner
+FLAREMO_SINGLE_USER_NAME = XilerMo Owner
 build_command = pnpm run build
 deploy_command = pnpm run deploy
 ```
@@ -56,7 +56,7 @@ deploy_command = pnpm run deploy
 - 创建独立 R2 bucket。
 - 自动执行 `0000`、`0001`、`0002` 三个 migration，`d1_migrations` 远端查询结果完整。
 - Worker 绑定指向上述独立 D1/R2，`FLAREMO_DEPLOY_REPOSITORY` 正确写入。
-- Worker 部署成功，首页返回 `200` 并包含 `<title>FlareMo</title>`。
+- Worker 部署成功，首页返回 `200` 并包含 `<title>XilerMo</title>`。
 - `/api/app/health` 返回 `200`、`ok: true`、版本 `0.3.0` 和正确更新仓库。
 
 验收时测试地址（临时资源已清理）：

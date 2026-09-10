@@ -11,8 +11,8 @@
 - 不修改主 Worker（`./wrangler.jsonc`）的 `FLAREMO_PUBLIC_URL`、Better Auth 配置、D1 schema、Memos 兼容 API
 - 不修改 `apps/web` 的渲染模型（保持纯 CSR SPA）；本包是独立 SSG + hydrate
 - 不引入 TanStack Start / Astro / Next 等新框架；保持 React + Vite + TanStack Router code-based
-- 不引入邮件订阅 endpoint（Phase 1 才接）
-- 不接 Stripe（Phase 2 才接）
+- 不引入邮件订阅 endpoint
+- 不接 Stripe
 - 不创建 GH Actions；部署走人工 `pnpm deploy:site`
 
 ## 设计 token 来源
@@ -48,7 +48,7 @@ pnpm deploy:site             # 部署到 flaremo.app
 
 部署后必须检查：
 
-- `https://flaremo.app/`、`/en/`、`/pricing`、`/en/pricing`、`/hosted`、`/en/hosted`、`/docs/`、`/en/docs/`、`/docs/<slug>`、`/en/docs/<slug>` 全部 200
+- `https://flaremo.app/`、`/en/`、`/pricing`、`/en/pricing`、`/docs/`、`/en/docs/`、`/docs/<slug>`、`/en/docs/<slug>` 全部 200
 - `view-source:` 看到完整 head（og、hreflang、JSON-LD）+ 非空 body
 - `https://flaremo.app/sitemap.xml` 与 `/robots.txt` 可访问
 - Lighthouse Performance ≥ 90（SSG 静态 HTML 首字节即有内容）

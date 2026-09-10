@@ -11,6 +11,7 @@ import {
   restoreMemoRevisionSchema,
   updateMemoSchema,
 } from "@flaremo/contracts";
+import { attachments } from "@flaremo/db";
 import {
   assertAttachmentStorageQuota,
   assertMemoCountQuota,
@@ -28,7 +29,6 @@ import {
   getDataTask,
   getMemoById,
   getShareByIdOrToken,
-  hardDeleteMemo,
   importData,
   listAttachments,
   listDataTasks,
@@ -38,7 +38,6 @@ import {
   listMemoShares,
   listMemos,
   markAttachmentDeleting,
-  markMemoAttachmentsDeleting,
   moveMemoToTrash,
   normalizeAttachmentClientId,
   replaceMemoRelations,
@@ -48,6 +47,7 @@ import {
   streamExportData,
   updateDataTask,
   updateMemo,
+  ValidationError,
 } from "@flaremo/domain";
 import {
   attachmentToDto,
@@ -60,6 +60,7 @@ import {
   shareToDto,
 } from "@flaremo/memos";
 import { zValidator } from "@hono/zod-validator";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   attachmentObjectResponse,
@@ -70,6 +71,7 @@ import {
 import { getRequestContext, type HonoBindings } from "../context";
 import { jsonError } from "../http";
 import { buildMemoContext } from "../memo-context";
+import { hardDeleteMemoWithAttachments } from "../memo-hard-delete";
 
 export const memosApi = new Hono<HonoBindings>();
 
@@ -195,14 +197,7 @@ memosApi.delete("/memos/:id", async (c) => {
     const { db, user } = await getRequestContext(c);
     const name = parseMemosResourceName(c.req.param("id"));
     if (c.req.query("hard") === "true") {
-      const attachments = await markMemoAttachmentsDeleting(db, user, name);
-      const objectKeys = attachments
-        .filter((attachment) => attachment.state !== "missing")
-        .map((attachment) => attachment.r2Key);
-      if (objectKeys.length > 0) {
-        await c.env.ATTACHMENTS.delete(objectKeys);
-      }
-      await hardDeleteMemo(db, user, name);
+      await hardDeleteMemoWithAttachments(c.env, db, user, name);
       return c.json({ ok: true });
     }
     const memo = await moveMemoToTrash(db, user, name);
@@ -504,25 +499,47 @@ memosApi.get("/export", async (c) => {
         413,
       );
     }
-    const attachments = [];
+    // Bundle rows already carry every exported attachment field except the
+    // R2 object key, so one batched key lookup replaces the previous
+    // per-attachment getAttachmentById re-query (which additionally re-ran
+    // the memo access checks the export scope had already established).
+    const readyNames = bundle.attachments
+      .filter((attachment) => attachment.state === "ready")
+      .map((attachment) => attachment.name);
+    const r2Keys = new Map<string, string>();
+    if (readyNames.length > 0) {
+      const rows = await db
+        .select({ id: attachments.id, r2Key: attachments.r2Key })
+        .from(attachments)
+        .where(
+          and(
+            inArray(attachments.id, readyNames),
+            eq(attachments.userId, user.id),
+            isNull(attachments.deletedAt),
+            eq(attachments.state, "ready"),
+          ),
+        );
+      for (const row of rows) r2Keys.set(row.id, row.r2Key);
+    }
+    const exportedAttachments = [];
     for (const attachment of bundle.attachments) {
       if (!includeBinary || attachment.state !== "ready") {
-        attachments.push(attachment);
+        exportedAttachments.push(attachment);
         continue;
       }
-      const row = await getAttachmentById(db, user, attachment.name);
-      const object = await c.env.ATTACHMENTS.get(row.r2Key);
+      const r2Key = r2Keys.get(attachment.name);
+      const object = r2Key ? await c.env.ATTACHMENTS.get(r2Key) : undefined;
       if (!object) {
-        attachments.push({ ...attachment, state: "missing" as const });
+        exportedAttachments.push({ ...attachment, state: "missing" as const });
         continue;
       }
       const body = await object.arrayBuffer();
-      attachments.push({
+      exportedAttachments.push({
         ...attachment,
         data_base64: arrayBufferToBase64(body),
       });
     }
-    return c.json({ ...bundle, attachments });
+    return c.json({ ...bundle, attachments: exportedAttachments });
   } catch (error) {
     return jsonError(c, error);
   }
@@ -598,13 +615,23 @@ memosApi.post(
   },
 );
 
+// btoa only accepts a "binary string", and concatenating one byte by byte
+// for a 32 MiB attachment produces a giant intermediate string. Encode
+// 8192 * 3 = 24576-byte chunks independently instead: every full chunk is a
+// multiple of 3 bytes, so its base64 has no interior padding and the chunk
+// outputs concatenate to exactly btoa(whole buffer).
+const BASE64_CHUNK_BYTES = 24576;
+
 function arrayBufferToBase64(buffer: ArrayBuffer) {
-  let binary = "";
   const bytes = new Uint8Array(buffer);
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_BYTES) {
+    const chunk = bytes.subarray(offset, offset + BASE64_CHUNK_BYTES);
+    chunks.push(
+      btoa(String.fromCharCode.apply(null, chunk as unknown as number[])),
+    );
   }
-  return btoa(binary);
+  return chunks.join("");
 }
 
 function base64ToUint8Array(value: string) {
@@ -721,7 +748,7 @@ memosApi.post("/export/tasks", async (c) => {
         500,
       );
     }
-    return c.json({ task: dataTaskToDto(done) }, 202);
+    return c.json({ task: dataTaskToDto(done!) }, 202);
   } catch (error) {
     if (taskId) {
       const context = await getRequestContext(c).catch(() => undefined);

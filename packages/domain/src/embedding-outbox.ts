@@ -51,6 +51,15 @@ export type EmbeddingDispatchDeps = {
    * against its owner's own usage; it wins over the deployment budget.
    */
   userLimits?: UserPlanLimits | null;
+  /**
+   * Dynamic per-user budget resolver for shared deployments. When set, each
+   * task's budget is resolved from the owning user at dispatch time (e.g. a
+   * subscription-backed resolver from a control plane); it wins over
+   * `userLimits` / `limits`. Return null for "no per-user budget enforced".
+   */
+  resolveUserLimits?: (
+    userId: string,
+  ) => Promise<UserPlanLimits | null> | UserPlanLimits | null;
 };
 
 /**
@@ -112,13 +121,11 @@ export async function dispatchEmbeddingOutbox(
     // Re-check inside the batch: earlier embeds in this sweep may have spent
     // the remaining budget, so release the rest rather than overshooting.
     // Each task is judged against its own user when per-user limits apply.
+    const scoped = deps.resolveUserLimits
+      ? await deps.resolveUserLimits(task.userId)
+      : deps.userLimits;
     if (
-      !(await embeddingBudgetAvailable(
-        db,
-        deps.limits,
-        deps.userLimits,
-        task.userId,
-      ))
+      !(await embeddingBudgetAvailable(db, deps.limits, scoped, task.userId))
     ) {
       await unclaimEmbeddingTask(db, task, nowIso);
       continue;
@@ -265,6 +272,8 @@ async function processMemoEmbeddingTask(
     ids.map((id, index_) => ({
       id,
       values: vectors[index_] ?? [],
+      // Memo vectors share one namespace: the D1 scope at query time is the
+      // authorization boundary, and metadata keeps the owner for tooling.
       metadata: { memo_id: memo.id, user_id: memo.userId },
     })),
   );
@@ -317,6 +326,7 @@ async function processMemoryEmbeddingTask(
       id: memoryIdVector(memory.id),
       values: vectors[0] ?? [],
       metadata: { memory_id: memory.id, user_id: memory.userId },
+      namespace: task.userId,
     },
   ]);
 
@@ -559,6 +569,7 @@ export async function rebuildEmbeddingIndexes(
           ids.map((id, index_) => ({
             id,
             values: vectors[index_] ?? [],
+            // Shared namespace, matching the memo write path above.
             metadata: { memo_id: memo.id, user_id: memo.userId },
           })),
         );
@@ -590,6 +601,7 @@ export async function rebuildEmbeddingIndexes(
         id: memory.id,
         values: vectors[0] ?? [],
         metadata: { memory_id: memory.id, user_id: memory.userId },
+        namespace: memory.userId,
       },
     ]);
     await db

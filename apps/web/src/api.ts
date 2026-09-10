@@ -8,6 +8,7 @@ import type {
   DailyReviewResponse,
   DataTaskDto,
   DeleteTagResponse,
+  ImportBundle,
   ImportResult,
   ListAppNotificationsResponse,
   ListMemosResponse,
@@ -27,7 +28,6 @@ import type {
   ReviewWalkVia,
   ShareDto,
   TagHierarchyResponse,
-  TaskActivityDto,
   TaskDto,
   TaskPriority,
   TaskStatus,
@@ -66,7 +66,6 @@ export type UpdateMemoryRequest = UpdateMemoryInput;
 
 export type Project = ProjectDto;
 export type Task = TaskDto;
-export type TaskActivity = TaskActivityDto;
 export type CreateProjectRequest = CreateProjectInput;
 export type UpdateProjectRequest = UpdateProjectInput;
 export type CreateTaskRequest = CreateTaskInput;
@@ -81,10 +80,6 @@ export type ListMemoParams = {
   include_deleted?: boolean;
   page_size?: number;
   page_token?: string;
-};
-
-export type ListAttachmentsResponse = {
-  attachments: Attachment[];
 };
 
 export type AppInfo = {
@@ -140,14 +135,11 @@ export type RegistrationStatus = {
 
 export type CurrentFlareMoUser = {
   id: string;
-  role: "owner" | "member";
+  role: "owner" | "admin" | "member";
+  status: "active" | "removed";
   name: string;
   email: string;
   username: string;
-};
-
-export type AdminSettings = {
-  registration_open: boolean;
 };
 
 export type AdminUser = {
@@ -155,7 +147,8 @@ export type AdminUser = {
   email: string;
   name: string;
   username: string;
-  role: "owner" | "member";
+  role: "owner" | "admin" | "member";
+  status: "active" | "removed";
   created_at: string;
 };
 
@@ -307,12 +300,6 @@ export async function createMemory(input: CreateMemoryRequest) {
   });
 }
 
-export async function getMemory(id: string) {
-  return apiRequest<{ memory: Memory }>(
-    `/api/app/memory/${encodeURIComponent(id)}`,
-  );
-}
-
 export async function updateMemory(id: string, input: UpdateMemoryRequest) {
   return apiRequest<{ memory: Memory }>(
     `/api/app/memory/${encodeURIComponent(id)}`,
@@ -360,12 +347,6 @@ export async function listMemoryRevisions(id: string) {
   );
 }
 
-export async function listMemoryRelations(id: string) {
-  return apiRequest<{ relations: MemoryRelation[] }>(
-    `/api/app/memory/${encodeURIComponent(id)}/relations`,
-  );
-}
-
 // --- Projects ---------------------------------------------------------------
 
 export async function listProjects(
@@ -382,12 +363,6 @@ export async function createProject(input: CreateProjectRequest) {
     method: "POST",
     body: JSON.stringify(input),
   });
-}
-
-export async function getProject(id: string) {
-  return apiRequest<{ project: Project }>(
-    `/api/app/projects/${encodeURIComponent(id)}`,
-  );
 }
 
 export async function updateProject(id: string, input: UpdateProjectRequest) {
@@ -432,10 +407,6 @@ export async function createTask(input: CreateTaskRequest) {
   });
 }
 
-export async function getTask(id: string) {
-  return apiRequest<{ task: Task }>(`/api/app/tasks/${encodeURIComponent(id)}`);
-}
-
 export async function updateTask(id: string, input: UpdateTaskRequest) {
   return apiRequest<{ task: Task }>(
     `/api/app/tasks/${encodeURIComponent(id)}`,
@@ -450,19 +421,6 @@ export async function deleteTask(id: string) {
   return apiRequest<{ ok: true }>(`/api/app/tasks/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
-}
-
-export async function reorderTasks(projectId: string, taskIds: string[]) {
-  return apiRequest<{ tasks: Task[] }>("/api/app/tasks/reorder", {
-    method: "POST",
-    body: JSON.stringify({ project_id: projectId, task_ids: taskIds }),
-  });
-}
-
-export async function listTaskActivity(id: string) {
-  return apiRequest<{ activity: TaskActivity[] }>(
-    `/api/app/tasks/${encodeURIComponent(id)}/activity`,
-  );
 }
 
 export async function createMemoryFromMemo(
@@ -491,9 +449,16 @@ export async function promoteMemoryToMemo(id: string) {
   );
 }
 
-export async function getLatestRelease(): Promise<LatestRelease> {
+// Repository used when the server does not advertise one via
+// /api/app/health (`update_repository`).
+const DEFAULT_RELEASE_REPOSITORY = "realchendahuang/FlareMo";
+
+export async function getLatestRelease(
+  repository: string | null | undefined = DEFAULT_RELEASE_REPOSITORY,
+): Promise<LatestRelease> {
+  const repo = repository || DEFAULT_RELEASE_REPOSITORY;
   const response = await fetch(
-    "https://api.github.com/repos/realchendahuang/FlareMo/releases/latest",
+    `https://api.github.com/repos/${repo}/releases/latest`,
     {
       credentials: "omit",
       headers: {
@@ -524,7 +489,7 @@ export async function getLatestRelease(): Promise<LatestRelease> {
         : `v${version}`,
     published_at:
       typeof release.published_at === "string" ? release.published_at : null,
-    url: `https://github.com/realchendahuang/FlareMo/releases/tag/v${encodeURIComponent(version)}`,
+    url: `https://github.com/${repo}/releases/tag/v${encodeURIComponent(version)}`,
   };
 }
 
@@ -619,29 +584,17 @@ export async function getCurrentFlareMoUser() {
   return apiRequest<CurrentFlareMoUser>("/api/app/me");
 }
 
-export async function getAdminSettings() {
-  return apiRequest<AdminSettings>("/api/app/admin/settings");
-}
-
-export async function updateAdminSettings(input: {
-  registration_open: boolean;
-}) {
-  return apiRequest<AdminSettings>("/api/app/admin/settings", {
-    method: "PATCH",
-    body: JSON.stringify(input),
-  });
-}
-
 export async function listAdminUsers() {
   return apiRequest<{ users: AdminUser[] }>("/api/app/admin/users");
 }
 
-export async function createAdminUser(input: {
-  name: string;
-  email: string;
-  password: string;
-}) {
-  return apiRequest<AdminUser>("/api/app/admin/users", {
+export async function createAdminUser(input: { name: string; email: string }) {
+  return apiRequest<
+    AdminUser & {
+      activation_path: string;
+      activation_expires_in_seconds: number;
+    }
+  >("/api/app/admin/users", {
     method: "POST",
     body: JSON.stringify(input),
   });
@@ -652,6 +605,19 @@ export async function deleteAdminUser(id: string) {
     `/api/app/admin/users/${encodeURIComponent(id)}`,
     {
       method: "DELETE",
+    },
+  );
+}
+
+export async function updateAdminUserRole(
+  id: string,
+  role: "admin" | "member",
+) {
+  return apiRequest<AdminUser>(
+    `/api/app/admin/users/${encodeURIComponent(id)}/role`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
     },
   );
 }
@@ -808,22 +774,6 @@ export async function uploadAttachment(input: {
   });
 }
 
-export async function listMemoAttachments(memo: string) {
-  return apiRequest<ListAttachmentsResponse>(
-    `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
-  );
-}
-
-export async function bindMemoAttachments(memo: string, attachments: string[]) {
-  return apiRequest<ListAttachmentsResponse>(
-    `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
-    {
-      method: "PATCH",
-      body: JSON.stringify({ attachments }),
-    },
-  );
-}
-
 export async function createShare(memo: string) {
   return apiRequest<Share>(`/api/v1/memos/${encodeURIComponent(memo)}/shares`, {
     method: "POST",
@@ -880,6 +830,18 @@ export async function getPublicShare(token: string) {
   );
 }
 
+/**
+ * Fetch the complete small export bundle. The worker returns 413 when the
+ * bundle would exceed its inline response budget; callers can then fall back
+ * to the chunked export-task flow without guessing the payload size locally.
+ */
+export async function exportDataInline(includeBinary = true) {
+  const query = new URLSearchParams({
+    include_binary: String(includeBinary),
+  });
+  return apiRequest<ImportBundle>(`/api/v1/export?${query.toString()}`);
+}
+
 export async function createExportTask() {
   return apiRequest<{ task: DataTaskDto }>("/api/v1/export/tasks", {
     method: "POST",
@@ -891,6 +853,10 @@ export async function getDataTask(id: string) {
   return apiRequest<{ task: DataTaskDto }>(
     `/api/v1/export/tasks/${encodeURIComponent(id)}`,
   );
+}
+
+export async function listDataTasks() {
+  return apiRequest<{ tasks: DataTaskDto[] }>("/api/v1/export/tasks");
 }
 
 export async function createImportTask(input: {

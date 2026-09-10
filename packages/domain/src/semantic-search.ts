@@ -1,11 +1,14 @@
-import type { FlareMoDb, UserRow } from "@flaremo/db";
+import type { FlareMoDb, MemoRow, UserRow } from "@flaremo/db";
 import { memos } from "@flaremo/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, inArray } from "drizzle-orm";
 import type { EmbeddingProvider, VectorIndex } from "./embedding";
+import { memoReadScope } from "./team-permissions";
 
 export type SemanticSearchDeps = {
   provider: EmbeddingProvider;
   index: VectorIndex;
+  /** Scopes the vector query to one tenant inside a shared index. */
+  namespace?: string;
 };
 
 export type SemanticMemoHit = {
@@ -38,9 +41,19 @@ export async function semanticSearchMemos(
   const [queryVector] = await deps.provider.embed([trimmed]);
   if (!queryVector || queryVector.length === 0) return [];
 
-  // Over-fetch then re-filter, because chunk-level matches collapse to memo
-  // level and the D1 status check can drop some of them.
-  const matches = await deps.index.query(queryVector, Math.min(limit * 3, 50));
+  // Memo embeddings live in one shared namespace, so a single vector query
+  // serves the whole team — including removed authors whose team/public memos
+  // are intentionally retained — and query cost stays constant as authors are
+  // added. Vectorize only supplies candidates; the D1 scope below remains the
+  // authorization boundary and drops private hits. (Memory embeddings keep
+  // per-user namespaces because memory recall is scoped to the caller's own
+  // items.) The widened top-K absorbs candidates from other authors that the
+  // D1 re-check may drop.
+  const matches = await deps.index.query(
+    queryVector,
+    Math.min(limit * 5, 100),
+    deps.namespace,
+  );
   if (matches.length === 0) return [];
 
   const candidateIds = [
@@ -51,7 +64,7 @@ export async function semanticSearchMemos(
     .from(memos)
     .where(
       and(
-        eq(memos.userId, user.id),
+        memoReadScope(user),
         inArray(memos.id, candidateIds),
         inArray(memos.status, ["normal", "archived"]),
       ),
@@ -73,4 +86,32 @@ export async function semanticSearchMemos(
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
     .map(([id, score]) => ({ id, score }));
+}
+
+/**
+ * Read back the candidate memos for a semantic search result set, preserving
+ * the caller's hit order. The scope is identical to the vector pre-filter, so
+ * this is the single D1 authorization boundary for rehydrating hits — routes
+ * must not query the memos table directly for search results.
+ */
+export async function getSemanticSearchMemos(
+  db: FlareMoDb,
+  user: UserRow,
+  candidateIds: string[],
+): Promise<MemoRow[]> {
+  if (candidateIds.length === 0) return [];
+  const rows = await db
+    .select()
+    .from(memos)
+    .where(
+      and(
+        memoReadScope(user),
+        inArray(memos.id, candidateIds),
+        inArray(memos.status, ["normal", "archived"]),
+      ),
+    );
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  return candidateIds
+    .map((id) => byId.get(id))
+    .filter((row): row is MemoRow => row !== undefined);
 }

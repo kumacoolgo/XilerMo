@@ -1,70 +1,60 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  CheckIcon,
   ClipboardIcon,
   KeyRoundIcon,
   Loader2Icon,
   Trash2Icon,
 } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 import {
   type AdminUser,
   createAdminUser,
   deleteAdminUser,
-  getAdminSettings,
   listAdminUsers,
   requestAdminPasswordReset,
-  updateAdminSettings,
+  updateAdminUserRole,
 } from "@/api";
-import { errorMessage } from "@/components/auth-page-frame";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/i18n";
-
-const MIN_PASSWORD_LENGTH = 12;
+import { errorMessage } from "@/lib/error";
 
 export function AdminPanel() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
   const [resetLink, setResetLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<AdminUser | null>(null);
 
-  const settingsQuery = useQuery({
-    queryKey: ["admin-settings"],
-    queryFn: getAdminSettings,
-    retry: false,
-  });
   const usersQuery = useQuery({
     queryKey: ["admin-users"],
     queryFn: listAdminUsers,
     retry: false,
   });
 
-  const updateSettingsMutation = useMutation({
-    mutationFn: updateAdminSettings,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["admin-settings"] });
-    },
-  });
   const createUserMutation = useMutation({
     mutationFn: createAdminUser,
     onSuccess: () => {
       setName("");
       setEmail("");
-      setPassword("");
       void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
     },
   });
@@ -74,26 +64,32 @@ export function AdminPanel() {
       void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
     },
   });
+  const updateRoleMutation = useMutation({
+    mutationFn: ({ id, role }: { id: string; role: "admin" | "member" }) =>
+      updateAdminUserRole(id, role),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["current-flaremo-user"],
+      });
+    },
+  });
 
   const handleCreateUser = async () => {
-    if (password.length < MIN_PASSWORD_LENGTH) {
-      setCreateError(t("auth.passwordLength"));
-      return;
-    }
     setCreateError(null);
     try {
-      await createUserMutation.mutateAsync({
+      const result = await createUserMutation.mutateAsync({
         name: name.trim(),
         email: email.trim(),
-        password,
       });
+      setResetLink(`${window.location.origin}${result.activation_path}`);
+      setCopied(false);
     } catch (error) {
       setCreateError(errorMessage(error, t("admin.userCreateFailed")));
     }
   };
 
   const handleDeleteUser = async (user: AdminUser) => {
-    if (!window.confirm(t("admin.deleteConfirm"))) return;
     try {
       await deleteUserMutation.mutateAsync(user.id);
     } catch (error) {
@@ -112,66 +108,29 @@ export function AdminPanel() {
     }
   };
 
+  const handleUpdateRole = async (user: AdminUser) => {
+    try {
+      await updateRoleMutation.mutateAsync({
+        id: user.id,
+        role: user.role === "admin" ? "member" : "admin",
+      });
+    } catch (error) {
+      setCreateError(errorMessage(error, t("admin.roleUpdateFailed")));
+    }
+  };
+
   const handleCopyResetLink = async () => {
     if (!resetLink) return;
     try {
       await navigator.clipboard.writeText(resetLink);
       setCopied(true);
     } catch {
-      setCreateError(t("admin.resetCopyFailed"));
+      toast.error(t("admin.resetCopyFailed"));
     }
   };
 
-  const registrationOpen = settingsQuery.data?.registration_open ?? false;
-
   return (
     <div className="flex flex-col gap-4">
-      <Card>
-        <CardHeader>
-          <CardTitle>{t("admin.registrationTitle")}</CardTitle>
-          <CardDescription>
-            {t("admin.registrationDescription")}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {settingsQuery.isLoading ? (
-            <Skeleton className="h-8 w-full" />
-          ) : settingsQuery.isError ? (
-            <p className="text-sm text-destructive">
-              {t("admin.settingsLoadFailed")}
-            </p>
-          ) : (
-            <div className="flex items-center justify-between gap-3 rounded-xl border px-4 py-3">
-              <span className="text-sm font-medium">
-                {registrationOpen
-                  ? t("admin.registrationOpen")
-                  : t("admin.registrationClosedState")}
-              </span>
-              <Switch
-                checked={registrationOpen}
-                disabled={updateSettingsMutation.isPending}
-                onCheckedChange={async (next) => {
-                  try {
-                    await updateSettingsMutation.mutateAsync({
-                      registration_open: next,
-                    });
-                  } catch (error) {
-                    setCreateError(
-                      errorMessage(error, t("admin.settingsSaveFailed")),
-                    );
-                  }
-                }}
-              />
-            </div>
-          )}
-          {updateSettingsMutation.isError && (
-            <p className="mt-3 text-sm text-destructive">
-              {t("admin.settingsSaveFailed")}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
       <Card>
         <CardHeader>
           <CardTitle>{t("admin.usersTitle")}</CardTitle>
@@ -215,22 +174,9 @@ export function AdminPanel() {
                 onChange={(event) => setEmail(event.target.value)}
               />
             </label>
-            <label
-              className="flex flex-col gap-1.5 text-sm font-medium"
-              htmlFor="admin-password"
-            >
-              {t("auth.password")}
-              <Input
-                autoComplete="new-password"
-                disabled={createUserMutation.isPending}
-                id="admin-password"
-                minLength={MIN_PASSWORD_LENGTH}
-                required
-                type="password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-              />
-            </label>
+            <p className="self-end text-xs leading-5 text-muted-foreground sm:col-span-2">
+              {t("admin.activationDescription")}
+            </p>
             <div className="sm:col-span-2">
               <Button disabled={createUserMutation.isPending} type="submit">
                 {createUserMutation.isPending && (
@@ -270,7 +216,7 @@ export function AdminPanel() {
               <div className="mt-3 flex flex-wrap gap-2">
                 <Button size="sm" onClick={() => void handleCopyResetLink()}>
                   {copied ? (
-                    <span>{t("auth.copied")}</span>
+                    <CheckIcon data-icon="inline-start" />
                   ) : (
                     <ClipboardIcon data-icon="inline-start" />
                   )}
@@ -316,11 +262,13 @@ export function AdminPanel() {
                     <p className="truncate text-sm font-medium">{user.name}</p>
                     <Badge variant="secondary">@{user.username}</Badge>
                     <Badge
-                      variant={user.role === "owner" ? "default" : "outline"}
+                      variant={user.role !== "member" ? "default" : "outline"}
                     >
                       {user.role === "owner"
                         ? t("admin.role.owner")
-                        : t("admin.role.member")}
+                        : user.role === "admin"
+                          ? t("admin.role.admin")
+                          : t("admin.role.member")}
                     </Badge>
                   </div>
                   <p className="mt-1 truncate text-xs text-muted-foreground">
@@ -329,6 +277,16 @@ export function AdminPanel() {
                 </div>
                 {user.role !== "owner" && (
                   <div className="flex items-center gap-2">
+                    <Button
+                      disabled={updateRoleMutation.isPending}
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void handleUpdateRole(user)}
+                    >
+                      {user.role === "admin"
+                        ? t("admin.makeMember")
+                        : t("admin.makeAdmin")}
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -341,7 +299,7 @@ export function AdminPanel() {
                       disabled={deleteUserMutation.isPending}
                       size="sm"
                       variant="outline"
-                      onClick={() => void handleDeleteUser(user)}
+                      onClick={() => setDeleteTarget(user)}
                     >
                       <Trash2Icon data-icon="inline-start" />
                       {t("admin.deleteUser")}
@@ -353,6 +311,35 @@ export function AdminPanel() {
           </div>
         </CardContent>
       </Card>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("admin.deleteUser")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("admin.deleteConfirm")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel variant="ghost">
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (deleteTarget) void handleDeleteUser(deleteTarget);
+              }}
+            >
+              {t("admin.deleteUser")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

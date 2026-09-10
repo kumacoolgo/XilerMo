@@ -62,12 +62,12 @@ type MemoCardProps = {
   onRestore: (id: string) => void;
   onHardDelete: (id: string) => Promise<void>;
   share?: Share;
-  shareUrl?: string;
   searchQuery?: string;
   /** Position in the list, used to stagger the entrance animation. */
   index?: number;
   /** Called when a tag chip is clicked to filter the timeline by that tag. */
   onTagClick?: (tag: string) => void;
+  canManage?: boolean;
 };
 
 export function MemoCard({
@@ -81,13 +81,16 @@ export function MemoCard({
   onRestore,
   onHardDelete,
   share,
-  shareUrl,
   searchQuery,
   index = 0,
   onTagClick,
+  canManage = false,
 }: MemoCardProps) {
   const { locale, t } = useI18n();
   const id = getMemoResourceId(memo);
+  const shareUrl = share
+    ? `${globalThis.location.origin}/share/${share.token}`
+    : undefined;
   const tags = memo.payload.tags ?? extractTags(memo.content);
   const isTrashed = memo.state === "trashed";
   const [isEditing, setIsEditing] = useState(false);
@@ -148,67 +151,70 @@ export function MemoCard({
           <span className="truncate tabular-nums">
             {formatMemoRelativeTime(memo.display_time, locale)}
           </span>
+          {memo.creator_name && <span>· {memo.creator_name}</span>}
         </Link>
         <div className="flex shrink-0 items-center gap-1">
           {memo.visibility !== "private" && (
             <VisibilityBadge visibility={memo.visibility} />
           )}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label={t("common.actions")}
-                className="opacity-100 motion-safe:transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
-                size="icon-sm"
-                variant="ghost"
-              >
-                <MoreHorizontalIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuGroup>
-                {isTrashed ? (
-                  <>
-                    <DropdownMenuItem onClick={() => onRestore(id)}>
-                      <RotateCcwIcon />
-                      {t("memo.restore")}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem
-                      variant="destructive"
-                      onSelect={() => setIsDeleteDialogOpen(true)}
-                    >
-                      <Trash2Icon />
-                      {t("memo.deleteForever")}
-                    </DropdownMenuItem>
-                  </>
-                ) : (
-                  <>
-                    <DropdownMenuItem onClick={startEditing}>
-                      <Edit3Icon />
-                      {t("common.edit")}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onPin(id, !memo.pinned)}>
-                      <PinIcon />
-                      {memo.pinned ? t("memo.unpin") : t("memo.pin")}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onArchive(id)}>
-                      <ArchiveIcon />
-                      {memo.state === "archived"
-                        ? t("memo.moveToTimeline")
-                        : t("view.archive")}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onShare(id)}>
-                      <Share2Icon />
-                      {t("memo.share")}
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onTrash(id)}>
-                      <Trash2Icon />
-                      {t("memo.moveToTrash")}
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {canManage && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label={t("common.actions")}
+                  className="opacity-100 motion-safe:transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
+                  size="icon-sm"
+                  variant="ghost"
+                >
+                  <MoreHorizontalIcon />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuGroup>
+                  {isTrashed ? (
+                    <>
+                      <DropdownMenuItem onClick={() => onRestore(id)}>
+                        <RotateCcwIcon />
+                        {t("memo.restore")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onSelect={() => setIsDeleteDialogOpen(true)}
+                      >
+                        <Trash2Icon />
+                        {t("memo.deleteForever")}
+                      </DropdownMenuItem>
+                    </>
+                  ) : (
+                    <>
+                      <DropdownMenuItem onClick={startEditing}>
+                        <Edit3Icon />
+                        {t("common.edit")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => onPin(id, !memo.pinned)}>
+                        <PinIcon />
+                        {memo.pinned ? t("memo.unpin") : t("memo.pin")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => onArchive(id)}>
+                        <ArchiveIcon />
+                        {memo.state === "archived"
+                          ? t("memo.moveToTimeline")
+                          : t("view.archive")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => onShare(id)}>
+                        <Share2Icon />
+                        {t("memo.share")}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => onTrash(id)}>
+                        <Trash2Icon />
+                        {t("memo.moveToTrash")}
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
       {isEditing ? (
@@ -234,7 +240,15 @@ export function MemoCard({
               type="single"
               value={draftVisibility}
               onValueChange={(value) => {
-                if (value) setDraftVisibility(value as MemoVisibility);
+                if (!value) return;
+                if (
+                  value === "public" &&
+                  draftVisibility !== "public" &&
+                  !window.confirm(t("visibility.publicConfirm"))
+                ) {
+                  return;
+                }
+                setDraftVisibility(value as MemoVisibility);
               }}
               size="sm"
               variant="outline"
@@ -285,13 +299,10 @@ export function MemoCard({
               <AttachmentGallery attachments={attachments} />
             </div>
           )}
-          {share && (
+          {share && shareUrl && (
             <div className="mt-3 rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
-              <a
-                className="font-mono hover:text-foreground"
-                href={shareUrl ?? `/share/${share.token}`}
-              >
-                {shareUrl ?? `/share/${share.token}`}
+              <a className="font-mono hover:text-foreground" href={shareUrl}>
+                {shareUrl}
               </a>
             </div>
           )}
@@ -356,10 +367,6 @@ export function MemoCard({
       </AlertDialog>
     </article>
   );
-}
-
-export function nextArchiveState(memo: Memo): MemoState {
-  return memo.state === "archived" ? "normal" : "archived";
 }
 
 function VisibilityBadge({ visibility }: { visibility: MemoVisibility }) {

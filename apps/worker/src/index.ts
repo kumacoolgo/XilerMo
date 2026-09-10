@@ -4,23 +4,33 @@ import {
 } from "@flaremo/contracts";
 import { createDb } from "@flaremo/db";
 import {
+  beginFlaremoMemberRemoval,
+  claimMemberRemovalJob,
   createDailyReviewNotifications,
   deleteExpiredDataTasks,
   dispatchEmbeddingOutbox,
   dispatchMemosWebhookOutbox,
   expireStaleDataTasks,
-  finalizeAttachmentCleanup,
+  failMemberRemovalJob,
+  finalizeAttachmentCleanupForIds,
+  finalizeFlaremoMemberRemoval,
+  getQueuedMemberRemovalJobsByIds,
   listAttachmentCleanupCandidates,
+  listQueuedMemberRemovalJobs,
   type PlanLimits,
   parseUserPlanLimits,
+  requeueStaleMemberRemovalJobs,
   SELF_HOST_UNLIMITED,
   type UserPlanLimits,
+  updateMemberRemovalJob,
 } from "@flaremo/domain";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createFlareMoAuth, getTrustedOrigins } from "./auth";
+import { cleanupFlaremoArtifacts } from "./artifact-cleanup";
+import { getTrustedOrigins } from "./auth";
 import {
   assertTrustedCookieMutation,
+  getFlareMoRuntime,
   getRequestContext,
   type HonoBindings,
 } from "./context";
@@ -62,7 +72,7 @@ export type FlareMoAppOptions = {
   /**
    * Per-user limits for shared deployments (e.g. public sign-up instances).
    * Defaults to the FLAREMO_USER_LIMITS_JSON env payload, which is user-agnostic.
-   * Hosted shells may resolve per-user plans here; subscription concepts stay
+   * External composition shells may resolve per-user plans here; subscription concepts stay
    * outside the kernel — this only ever returns numbers-or-null.
    */
   resolveUserPlanLimits?: (
@@ -71,14 +81,25 @@ export type FlareMoAppOptions = {
   ) => Promise<UserPlanLimits | null> | UserPlanLimits | null;
 };
 
+type ResolvedFlareMoOptions = Required<FlareMoAppOptions>;
+
+function resolveFlareMoOptions(
+  options: FlareMoAppOptions,
+): ResolvedFlareMoOptions {
+  return {
+    resolvePlanLimits:
+      options.resolvePlanLimits ?? ((_env: FlareMoEnv) => SELF_HOST_UNLIMITED),
+    resolveUserPlanLimits:
+      options.resolveUserPlanLimits ??
+      ((env: FlareMoEnv) => parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON)),
+  };
+}
+
 export function createFlareMoApp(
   options: FlareMoAppOptions = {},
 ): Hono<HonoBindings> {
-  const resolvePlanLimits =
-    options.resolvePlanLimits ?? ((env: FlareMoEnv) => SELF_HOST_UNLIMITED);
-  const resolveUserPlanLimits =
-    options.resolveUserPlanLimits ??
-    ((env: FlareMoEnv) => parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON));
+  const { resolvePlanLimits, resolveUserPlanLimits } =
+    resolveFlareMoOptions(options);
   const app = new Hono<HonoBindings>();
 
   app.use("*", async (c, next) => {
@@ -183,7 +204,7 @@ export function createFlareMoApp(
       const throttled = await rateLimitGuard(c, bucket);
       if (throttled) return throttled;
     }
-    return createFlareMoAuth(c.env).handler(c.req.raw);
+    return getFlareMoRuntime(c.env).auth.handler(c.req.raw);
   });
   app.route("/api/app/account", accountApi);
   app.route("/api/app/admin", adminApi);
@@ -226,85 +247,248 @@ export function createFlareMoApp(
     if (c.req.path.startsWith("/api/")) {
       return c.json({ error: { message: "Not found" } }, 404);
     }
-    return c.env.ASSETS.fetch(c.req.raw);
+    return c.env.ASSETS.fetch(c.req.raw).then((response) => {
+      // Vite asset filenames contain a content hash. They are safe to cache
+      // for a year; HTML and application routes remain revalidated normally.
+      if (/^\/assets\/[A-Za-z0-9._-]+-[A-Za-z0-9]{8,}\./.test(c.req.path)) {
+        const headers = new Headers(response.headers);
+        headers.set("cache-control", "public, max-age=31536000, immutable");
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      }
+      return response;
+    });
   });
 
   return app;
 }
 
-const handler = {
-  async fetch(request: Request, env: FlareMoEnv, ctx?: ExecutionContext) {
-    const response = await createFlareMoApp().fetch(request, env, ctx);
-    ctx?.waitUntil(
-      dispatchMemosWebhookOutbox(createDb(env.DB)).catch(() => undefined),
-    );
-    ctx?.waitUntil(
-      dispatchEmbeddingOutbox(createDb(env.DB), {
-        provider: createEmbeddingProvider(env),
-        memosIndex: createVectorIndex(env, "memo"),
-        memoriesIndex: createVectorIndex(env, "memory"),
-        limits: SELF_HOST_UNLIMITED,
-        userLimits: parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON),
-      }).catch(() => undefined),
-    );
-    return response;
-  },
-  async scheduled(controller: ScheduledController, env: FlareMoEnv) {
-    await dispatchMemosWebhookOutbox(createDb(env.DB));
-    await dispatchEmbeddingOutbox(createDb(env.DB), {
-      provider: createEmbeddingProvider(env),
-      memosIndex: createVectorIndex(env, "memo"),
-      memoriesIndex: createVectorIndex(env, "memory"),
-      limits: SELF_HOST_UNLIMITED,
-      userLimits: parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON),
-    });
-    const db = createDb(env.DB);
-    const cutoff = new Date(
-      controller.scheduledTime - 24 * 60 * 60 * 1_000,
-    ).toISOString();
-    const candidates = await listAttachmentCleanupCandidates(db, cutoff);
-    const objectKeys = candidates.map((attachment) => attachment.r2Key);
-    if (objectKeys.length > 0) {
-      await env.ATTACHMENTS.delete(objectKeys);
+/**
+ * Daily maintenance run: dispatch webhook + embedding outboxes, clean up
+ * orphaned attachments and expired data-transfer tasks, and file "on this
+ * day" review notifications. Exported so a shared-instance shell (hosted
+ * composition) can drive the exact same sequence without mirroring it.
+ */
+export async function runScheduledMaintenance(
+  env: FlareMoEnv,
+  scheduledTime: number,
+  options: {
+    limits?: PlanLimits;
+    userLimits?: UserPlanLimits | null;
+    resolveUserLimits?: (
+      userId: string,
+    ) => Promise<UserPlanLimits | null> | UserPlanLimits | null;
+    removalJobIds?: string[];
+  } = {},
+): Promise<void> {
+  const db = createDb(env.DB);
+  await requeueStaleMemberRemovalJobs(db, scheduledTime);
+  const removalJobs = options.removalJobIds
+    ? await getQueuedMemberRemovalJobsByIds(db, options.removalJobIds)
+    : await listQueuedMemberRemovalJobs(db);
+  for (const job of removalJobs) {
+    try {
+      if (!(await claimMemberRemovalJob(db, job.id))) continue;
+      await updateMemberRemovalJob(db, job.id, {
+        attempts: (job.attempts ?? 0) + 1,
+      });
+      const artifacts = await beginFlaremoMemberRemoval(db, job.memberId);
+      await updateMemberRemovalJob(db, job.id, { phase: "cleaning_artifacts" });
+      await cleanupFlaremoArtifacts(env, artifacts);
+      await finalizeFlaremoMemberRemoval(db, job.memberId, artifacts);
+      await updateMemberRemovalJob(db, job.id, {
+        status: "completed",
+        phase: "completed",
+        completedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      await failMemberRemovalJob(
+        db,
+        job.id,
+        "scheduled_member_removal_failed",
+        error instanceof Error ? error.message : "Member removal failed",
+      ).catch(() => undefined);
+      // Propagate the failure so Queue does not acknowledge the batch. The
+      // platform can then apply its configured retry policy.
+      if (options.removalJobIds) throw error;
     }
-    for (const attachment of candidates) {
-      await finalizeAttachmentCleanup(db, attachment.id);
-    }
-    // Reconcile data-transfer tasks: expire stale queued/running tasks whose
-    // lease lapsed (interrupted request), then garbage-collect completed task
-    // rows older than the TTL along with their R2 export artifacts.
-    const staleCount = await expireStaleDataTasks(db);
-    const expiredIds = await deleteExpiredDataTasks(db);
-    for (const id of expiredIds) {
-      const prefix = `exports/${id}`;
-      let cursor: string | undefined;
-      do {
-        const listing = await env.ATTACHMENTS.list({ prefix, cursor });
-        const keys = listing.objects.map((object) => object.key);
-        if (keys.length > 0) await env.ATTACHMENTS.delete(keys);
-        cursor = listing.truncated ? listing.cursor : undefined;
-      } while (cursor);
-    }
-    // Daily review reach-out: file one idempotent inbox row per user when the
-    // UTC calendar day has "on this day" history. The source-event unique
-    // index absorbs cron retries, so a repeat run for the same date is a no-op.
-    const reviewDate = new Date(controller.scheduledTime)
-      .toISOString()
-      .slice(0, 10);
-    const reviewNotificationCount = await createDailyReviewNotifications(db, {
-      date: reviewDate,
-    });
-    console.log(
-      JSON.stringify({
-        message: "attachment cleanup complete",
-        count: candidates.length,
-        staleTaskCount: staleCount,
-        expiredTaskCount: expiredIds.length,
-        reviewNotificationCount,
-        scheduledTime: controller.scheduledTime,
-      }),
-    );
-  },
-} satisfies ExportedHandler<FlareMoEnv>;
+  }
+  await dispatchMemosWebhookOutbox(db);
+  await dispatchEmbeddingOutbox(db, {
+    provider: createEmbeddingProvider(env),
+    memosIndex: createVectorIndex(env, "memo"),
+    memoriesIndex: createVectorIndex(env, "memory"),
+    limits: options.limits ?? SELF_HOST_UNLIMITED,
+    userLimits:
+      options.userLimits === undefined
+        ? parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON)
+        : options.userLimits,
+    resolveUserLimits: options.resolveUserLimits,
+  });
+  const cutoff = new Date(scheduledTime - 24 * 60 * 60 * 1_000).toISOString();
+  const candidates = await listAttachmentCleanupCandidates(db, cutoff);
+  const objectKeys = candidates.map((attachment) => attachment.r2Key);
+  if (objectKeys.length > 0) {
+    await env.ATTACHMENTS.delete(objectKeys);
+  }
+  await finalizeAttachmentCleanupForIds(
+    db,
+    candidates.map((attachment) => attachment.id),
+  );
+  // Reconcile data-transfer tasks: expire stale queued/running tasks whose
+  // lease lapsed (interrupted request), then garbage-collect completed task
+  // rows older than the TTL along with their R2 export artifacts.
+  const staleCount = await expireStaleDataTasks(db);
+  const expiredIds = await deleteExpiredDataTasks(db);
+  for (const id of expiredIds) {
+    const prefix = `exports/${id}`;
+    let cursor: string | undefined;
+    do {
+      const listing = await env.ATTACHMENTS.list({ prefix, cursor });
+      const keys = listing.objects.map((object) => object.key);
+      if (keys.length > 0) await env.ATTACHMENTS.delete(keys);
+      cursor = listing.truncated ? listing.cursor : undefined;
+    } while (cursor);
+  }
+  // Daily review reach-out: file one idempotent inbox row per user when the
+  // UTC calendar day has "on this day" history. The source-event unique
+  // index absorbs cron retries, so a repeat run for the same date is a no-op.
+  const reviewDate = new Date(scheduledTime).toISOString().slice(0, 10);
+  const reviewNotificationCount = await createDailyReviewNotifications(db, {
+    date: reviewDate,
+  });
+  console.log(
+    JSON.stringify({
+      message: "attachment cleanup complete",
+      count: candidates.length,
+      staleTaskCount: staleCount,
+      expiredTaskCount: expiredIds.length,
+      reviewNotificationCount,
+      scheduledTime,
+    }),
+  );
+}
 
-export default handler;
+async function dispatchRequestEmbeddingOutbox(
+  env: FlareMoEnv,
+  options: ResolvedFlareMoOptions,
+  hasCustomUserPlanLimits: boolean,
+) {
+  await dispatchEmbeddingOutbox(createDb(env.DB), {
+    provider: createEmbeddingProvider(env),
+    memosIndex: createVectorIndex(env, "memo"),
+    memoriesIndex: createVectorIndex(env, "memory"),
+    limits: await options.resolvePlanLimits(env),
+    userLimits: hasCustomUserPlanLimits
+      ? null
+      : parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON),
+    resolveUserLimits: hasCustomUserPlanLimits
+      ? (userId) => options.resolveUserPlanLimits(env, userId)
+      : undefined,
+  });
+}
+
+function logBackgroundTaskFailure(task: string, error: unknown) {
+  console.error(
+    JSON.stringify({
+      message: "Background task failed",
+      task,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  );
+}
+
+/**
+ * Build the complete Worker lifecycle for an installation of FlareMo.
+ *
+ * `createFlareMoApp` intentionally only assembles HTTP routes so tests and
+ * advanced hosts can mount it. Production entrypoints should use this factory:
+ * it keeps request outbox dispatch and Cron maintenance coupled to the same
+ * plan-limit policy as the HTTP application.
+ */
+export function createFlareMoWorker(
+  options: FlareMoAppOptions = {},
+): ExportedHandler<FlareMoEnv> {
+  const resolvedOptions = resolveFlareMoOptions(options);
+  const hasCustomUserPlanLimits = options.resolveUserPlanLimits !== undefined;
+  // The Hono app closes only over the resolved options — route modules are
+  // constants and everything else reads c.env per request — so one instance
+  // serves every request of this isolate instead of rebuilding the full
+  // middleware and route table per request.
+  const app = createFlareMoApp(resolvedOptions);
+
+  return {
+    async fetch(request, env, ctx) {
+      const response = await app.fetch(request, env, ctx);
+      // Outbox sweeps are maintenance: mutating requests trigger them (they
+      // are the ones that can enqueue work), so reads skip the fixed
+      // per-request query tax. The daily cron sweeps whatever reads missed.
+      const method = request.method.toUpperCase();
+      if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+        const { db } = getFlareMoRuntime(env);
+        // `ExecutionContext` is part of the Worker handler contract. Keeping
+        // this post-response work on `waitUntil` avoids changing the route-only
+        // test semantics for direct handler calls without a Worker runtime.
+        ctx?.waitUntil(
+          dispatchMemosWebhookOutbox(db).catch((error) =>
+            logBackgroundTaskFailure("memos_webhook_outbox", error),
+          ),
+        );
+        ctx?.waitUntil(
+          dispatchRequestEmbeddingOutbox(
+            env,
+            resolvedOptions,
+            hasCustomUserPlanLimits,
+          ).catch((error) =>
+            logBackgroundTaskFailure("embedding_outbox", error),
+          ),
+        );
+      }
+      return response;
+    },
+    async scheduled(controller, env) {
+      await runScheduledMaintenance(env, controller.scheduledTime, {
+        limits: await resolvedOptions.resolvePlanLimits(env),
+        userLimits: hasCustomUserPlanLimits
+          ? null
+          : parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON),
+        resolveUserLimits: hasCustomUserPlanLimits
+          ? (userId) => resolvedOptions.resolveUserPlanLimits(env, userId)
+          : undefined,
+      });
+    },
+    async queue(batch, env) {
+      // The queue shares the same idempotent executor as scheduled maintenance
+      // so retries cannot diverge from the daily recovery path.
+      await runScheduledMaintenance(env, Date.now(), {
+        limits: await resolvedOptions.resolvePlanLimits(env),
+        userLimits: hasCustomUserPlanLimits
+          ? null
+          : parseUserPlanLimits(env.FLAREMO_USER_LIMITS_JSON),
+        resolveUserLimits: hasCustomUserPlanLimits
+          ? (userId) => resolvedOptions.resolveUserPlanLimits(env, userId)
+          : undefined,
+        // A malformed body can never become valid on retry — drop it here so
+        // the batch ack removes the poison message instead of looping.
+        removalJobIds: batch.messages.flatMap((message) => {
+          const jobId = (message.body as { jobId?: unknown }).jobId;
+          if (typeof jobId !== "string" || !jobId) {
+            console.warn(
+              JSON.stringify({
+                message: "Discarded malformed member-removal queue message",
+              }),
+            );
+            return [];
+          }
+          return [jobId];
+        }),
+      });
+      for (const message of batch.messages) message.ack();
+    },
+  };
+}
+
+export default createFlareMoWorker();

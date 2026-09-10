@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import {
+  applyFlaremoMigrations,
   createDb,
   memosNotifications,
   memosWebhookDeliveries,
@@ -666,6 +665,10 @@ describe("Memos native auth and transport boundaries", () => {
       ]),
     );
 
+    // Link metadata drives a server-side fetch, so it now sits behind auth:
+    // unauthenticated callers get 401 before any URL validation. The fetch
+    // rules themselves (internal-IP blocks, content types) stay covered by
+    // the memos-link-metadata unit tests.
     const invalidLink = await request(
       "/memos.api.v1.MemoService/GetLinkMetadata",
       {
@@ -674,7 +677,7 @@ describe("Memos native auth and transport boundaries", () => {
         body: JSON.stringify({ url: "http://127.0.0.1/" }),
       },
     );
-    expect(invalidLink.status).toBe(400);
+    expect(invalidLink.status).toBe(401);
     const emptyBinaryLink = await request(
       "/memos.api.v1.MemoService/GetLinkMetadata",
       {
@@ -683,8 +686,10 @@ describe("Memos native auth and transport boundaries", () => {
         body: new Uint8Array(),
       },
     );
-    expect(emptyBinaryLink.status).toBe(400);
-    expect(emptyBinaryLink.headers.get("grpc-status")).toBe("3");
+    // An empty proto frame decodes to an empty message; the request then hits
+    // the auth boundary, which reports 401 / UNAUTHENTICATED (grpc code 16).
+    expect(emptyBinaryLink.status).toBe(401);
+    expect(emptyBinaryLink.headers.get("grpc-status")).toBe("16");
     const emptyBatch = await request(
       "/memos.api.v1.MemoService/BatchGetLinkMetadata",
       {
@@ -693,7 +698,7 @@ describe("Memos native auth and transport boundaries", () => {
         body: JSON.stringify({ urls: [] }),
       },
     );
-    expect(emptyBatch.status).toBe(400);
+    expect(emptyBatch.status).toBe(401);
 
     const grpcWebCreate = await request(
       "/memos.api.v1.MemoService/CreateMemo",
@@ -1437,32 +1442,7 @@ async function createTestRuntime() {
     },
   });
   const db = await runtime.getD1Database("DB");
-  for (const filename of [
-    "0000_illegal_inhumans.sql",
-    "0001_familiar_morph.sql",
-    "0002_wooden_professor_monster.sql",
-    "0003_equal_maximus.sql",
-    "0004_complex_the_enforcers.sql",
-    "0005_confused_masque.sql",
-    "0006_silent_kylun.sql",
-    "0007_flat_phil_sheldon.sql",
-    "0008_legal_scarecrow.sql",
-    "0009_neat_iron_fist.sql",
-    "0010_deep_gateway.sql",
-    "0011_daffy_ultron.sql",
-    "0012_slow_nick_fury.sql",
-  ]) {
-    const sql = await readFile(
-      resolve(import.meta.dirname, `../../../migrations/${filename}`),
-      "utf8",
-    );
-    for (const statement of sql
-      .split("--> statement-breakpoint")
-      .map((value) => value.trim())
-      .filter(Boolean)) {
-      await db.prepare(statement).run();
-    }
-  }
+  await applyFlaremoMigrations(db);
   mf = runtime;
   env = {
     DB: db,
