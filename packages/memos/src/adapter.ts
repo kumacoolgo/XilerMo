@@ -14,6 +14,7 @@ import type {
   ShareRow,
   UserRow,
 } from "@flaremo/db";
+import { canEditMemo } from "@flaremo/domain";
 
 type MemoRelationRow = {
   memoId: string;
@@ -22,7 +23,11 @@ type MemoRelationRow = {
   createdAt: string;
 };
 
-export function memoToDto(memo: MemoRow, user: UserRow): MemoDto {
+export function memoToDto(
+  memo: MemoRow,
+  _user: UserRow,
+  creatorName?: string,
+): MemoDto {
   return {
     name: memo.id,
     id: memo.id.replace(/^memos\//, ""),
@@ -34,7 +39,8 @@ export function memoToDto(memo: MemoRow, user: UserRow): MemoDto {
     create_time: memo.createdAt,
     update_time: memo.updatedAt,
     display_time: memo.createdAt,
-    creator: user.id,
+    creator: memo.userId,
+    ...(creatorName ? { creator_name: creatorName } : {}),
   };
 }
 
@@ -92,13 +98,17 @@ export function memoRevisionToDto(revision: MemoRevisionRow): MemoRevisionDto {
 
 export function memosToListResponse(input: {
   attachmentsByMemo?: ReadonlyMap<string, AttachmentRow[]>;
+  creatorNames?: ReadonlyMap<string, string>;
   memos: MemoRow[];
   user: UserRow;
   nextPageToken?: string;
 }): ListMemosResponse {
   return {
     memos: input.memos.map((memo) => ({
-      ...memoToDto(memo, input.user),
+      ...memoToDto(memo, input.user, input.creatorNames?.get(memo.userId)),
+      // Single source of truth for the edit/manage rule (see canEditMemo);
+      // clients must not re-derive team permissions locally.
+      can_manage: canEditMemo(input.user, memo),
       ...(input.attachmentsByMemo
         ? {
             attachments: (input.attachmentsByMemo.get(memo.id) ?? []).map(

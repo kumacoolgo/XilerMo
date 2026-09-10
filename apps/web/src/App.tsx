@@ -1,24 +1,5 @@
-import type { ListMemosResponse } from "@flaremo/contracts";
-import {
-  type InfiniteData,
-  type QueryClient,
-  type QueryKey,
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import {
-  createRootRoute,
-  createRoute,
-  createRouter,
-  Link,
-  Navigate,
-  Outlet,
-  RouterProvider,
-  useNavigate,
-  useRouter,
-} from "@tanstack/react-router";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   DownloadIcon,
   LanguagesIcon,
@@ -29,10 +10,7 @@ import {
   UploadIcon,
 } from "lucide-react";
 import {
-  lazy,
-  type ReactNode,
   type RefObject,
-  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -41,32 +19,15 @@ import {
 } from "react";
 import { toast } from "sonner";
 import {
-  ApiError,
-  AUTHENTICATION_REQUIRED_EVENT,
-  createExportTask,
-  createImportTask,
-  createMemo,
-  createShare,
-  deleteTag,
-  downloadExportJson,
-  getDataTask,
   getMemoStats,
   getTagHierarchy,
-  hardDeleteMemo,
+  getVectorUsage,
   listMemos,
-  type Memo,
-  type MemoState,
   type MemoStatsResponse,
-  renameTag,
-  type Share,
   semanticSearchMemos,
-  trashMemo,
-  updateMemo,
-  uploadAttachment,
 } from "@/api";
-import { authClient } from "@/auth-client";
+import type { ExplorerView as ViewMode } from "@/components/flaremo-explorer";
 import { FlareMoExplorer } from "@/components/flaremo-explorer";
-import type { MemoView as ViewMode } from "@/components/flaremo-sidebar";
 import { MemoComposer } from "@/components/memo-composer";
 import { MemoList } from "@/components/memo-list";
 import { NotificationBell } from "@/components/notification-bell";
@@ -78,10 +39,10 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
 import { UpdateStatus } from "@/components/update-status";
+import { useDataTransfer } from "@/hooks/use-data-transfer";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
+import { useMemoMutations, viewToMemoState } from "@/hooks/use-memo-mutations";
 import { useNewMemoCapture } from "@/hooks/use-new-memo-capture";
 import { type TranslationKey, useI18n } from "@/i18n";
 import {
@@ -91,83 +52,14 @@ import {
   isBrowserOnline,
   type MemoCaptureInput,
 } from "@/lib/local-memo-capture";
+import {
+  shouldContinueQueuedSubmissionAfterFailure,
+  shouldQueueAfterFailure,
+  validateMemoCaptureSubmission,
+} from "@/lib/memo-submission";
 import { cn } from "@/lib/utils";
-
-const MemoDetailPage = lazy(() =>
-  import("@/pages/memo-detail-page").then((module) => ({
-    default: module.MemoDetailPage,
-  })),
-);
-const PublicSharePage = lazy(() =>
-  import("@/pages/public-share-page").then((module) => ({
-    default: module.PublicSharePage,
-  })),
-);
-const LoginPage = lazy(() =>
-  import("@/pages/login-page").then((module) => ({
-    default: module.LoginPage,
-  })),
-);
-const RegisterPage = lazy(() =>
-  import("@/pages/register-page").then((module) => ({
-    default: module.RegisterPage,
-  })),
-);
-const ResetPage = lazy(() =>
-  import("@/pages/reset-page").then((module) => ({
-    default: module.ResetPage,
-  })),
-);
-const VerifyEmailPage = lazy(() =>
-  import("@/pages/verify-email-page").then((module) => ({
-    default: module.VerifyEmailPage,
-  })),
-);
-const ForgotPasswordPage = lazy(() =>
-  import("@/pages/forgot-password-page").then((module) => ({
-    default: module.ForgotPasswordPage,
-  })),
-);
-const VerifyEmailChangePage = lazy(() =>
-  import("@/pages/verify-email-change-page").then((module) => ({
-    default: module.VerifyEmailChangePage,
-  })),
-);
-const RecoverPage = lazy(() =>
-  import("@/pages/recover-page").then((module) => ({
-    default: module.RecoverPage,
-  })),
-);
-const SetupPage = lazy(() =>
-  import("@/pages/setup-page").then((module) => ({
-    default: module.SetupPage,
-  })),
-);
-const AccountPage = lazy(() =>
-  import("@/pages/account-page").then((module) => ({
-    default: module.AccountPage,
-  })),
-);
-const DailyReviewPage = lazy(() =>
-  import("@/pages/daily-review-page").then((module) => ({
-    default: module.DailyReviewPage,
-  })),
-);
-const RandomWalkPage = lazy(() =>
-  import("@/pages/random-walk-page").then((module) => ({
-    default: module.RandomWalkPage,
-  })),
-);
-const MemoryPage = lazy(() =>
-  import("@/pages/memory-page").then((module) => ({
-    default: module.MemoryPage,
-  })),
-);
-const ProjectsPage = lazy(() =>
-  import("@/pages/projects-page").then((module) => ({
-    default: module.ProjectsPage,
-  })),
-);
+import { AppRoutes } from "@/router-tree";
+import { indexRoute, registerWorkspaceComponent } from "@/routes/index-route";
 
 const PAGE_SIZE = 30;
 const EMPTY_STATS: MemoStatsResponse = {
@@ -177,9 +69,13 @@ const EMPTY_STATS: MemoStatsResponse = {
   activity: [],
 };
 
-function FlareMoApp() {
+// Breaks the App ↔ router-tree import cycle: the route tree renders the
+// workspace through this registry instead of importing `@/App`. Module-eval
+// order guarantees registration before the router's first render.
+registerWorkspaceComponent(FlareMoApp);
+
+export function FlareMoApp() {
   const { t, toggleLocale } = useI18n();
-  const queryClient = useQueryClient();
   const navigate = useNavigate({ from: "/" });
   const search = indexRoute.useSearch();
   const view = search.view ?? "all";
@@ -216,9 +112,6 @@ function FlareMoApp() {
         view: q.trim() ? "all" : view,
       }),
     });
-  const [sharesByMemo, setSharesByMemo] = useState<Map<string, Share>>(
-    new Map(),
-  );
   const [timeZone] = useState(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   );
@@ -227,6 +120,7 @@ function FlareMoApp() {
   const desktopSearchRef = useRef<HTMLInputElement>(null);
   const mobileSearchRef = useRef<HTMLInputElement>(null);
   const [isTimelineScrolled, setIsTimelineScrolled] = useState(false);
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const isQueueFlushing = useRef(false);
   const isQueueFlushPending = useRef(false);
   const isCaptureSubmitting = useRef(false);
@@ -236,6 +130,23 @@ function FlareMoApp() {
   const debouncedQuery = useDebouncedValue(query.trim(), 250);
   const isSearching = Boolean(debouncedQuery);
   const [semanticMode, setSemanticMode] = useState(false);
+
+  const vectorUsageQuery = useQuery({
+    queryKey: ["vector-usage"],
+    queryFn: () => getVectorUsage(),
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  // Semantic search is hidden when the plan has no budget for it (quota 0)
+  // or the capability itself is disabled server-side.
+  const semanticEnabled = useMemo(() => {
+    const plan = vectorUsageQuery.data?.plan;
+    if (!plan) return false;
+    const limit =
+      plan.user?.limits.semanticSearchQueriesPerMonth ??
+      plan.limits.semanticSearchQueriesPerMonth;
+    return typeof limit === "number" && limit > 0;
+  }, [vectorUsageQuery.data]);
 
   const semanticResultsQuery = useQuery({
     queryKey: ["semantic-search", debouncedQuery],
@@ -247,7 +158,6 @@ function FlareMoApp() {
     () => semanticResultsQuery.data?.memos ?? [],
     [semanticResultsQuery.data],
   );
-  const semanticDegraded = semanticResultsQuery.data?.degraded ?? false;
 
   useEffect(() => {
     const focusSearch = () => {
@@ -327,125 +237,24 @@ function FlareMoApp() {
   );
   const stats = statsQuery.data ?? EMPTY_STATS;
 
-  const invalidateWorkspace = () =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["memos"] }),
-      queryClient.invalidateQueries({ queryKey: ["memo-stats"] }),
-      queryClient.invalidateQueries({ queryKey: ["tag-hierarchy"] }),
-    ]);
-  const handleMutationError = (error: unknown) => {
-    const normalizedError = toError(error);
-    if (
-      normalizedError instanceof ApiError &&
-      (normalizedError.status === 401 || normalizedError.status === 403)
-    ) {
-      toast.error(t("toast.accessRequired"));
-      return;
-    }
-    toast.error(normalizedError.message);
-  };
+  const {
+    createMemoAsync,
+    isCreatingMemo,
+    deleteTagMutation,
+    handleMutationError,
+    hardDeleteMutation,
+    invalidateWorkspace,
+    renameTagMutation,
+    restoreMutation,
+    sharesByMemo,
+    shareMutation,
+    trashMutation,
+    updateMutation,
+  } = useMemoMutations();
 
-  const { mutateAsync: createMemoAsync, isPending: isCreatingMemo } =
-    useMutation({
-      mutationFn: createMemoWithAttachments,
-      onSuccess: () => {
-        void invalidateWorkspace();
-      },
-      // A memo can be created before one of its attachment uploads loses the
-      // network response. Refresh the list even on failure so the durable
-      // memo is not hidden while its queued attachment retry is pending.
-      onError: () => {
-        void invalidateWorkspace();
-      },
-    });
-
-  const trashMutation = useMutation({
-    mutationFn: trashMemo,
-    onMutate: (id) =>
-      optimisticallyPatchMemo(queryClient, id, { state: "trashed" }),
-    onSuccess: () => {
-      toast.success(t("toast.movedToTrash"));
-    },
-    onError: (error, _id, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const renameTagMutation = useMutation({
-    mutationFn: renameTag,
-    onError: (error) => {
-      handleMutationError(error);
-      toast.error(t("explorer.tagRenameFailed"));
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const deleteTagMutation = useMutation({
-    mutationFn: deleteTag,
-    onError: (error) => {
-      handleMutationError(error);
-      toast.error(t("explorer.tagDeleteFailed"));
-    },
-    onSuccess: () => toast.success(t("explorer.tagDeleted")),
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const restoreMutation = useMutation({
-    mutationFn: (id: string) => updateMemo(id, { status: "normal" }),
-    onMutate: (id) =>
-      optimisticallyPatchMemo(queryClient, id, { state: "normal" }),
-    onSuccess: () => {
-      toast.success(t("toast.restored"));
-    },
-    onError: (error, _id, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      input,
-    }: {
-      id: string;
-      input: Parameters<typeof updateMemo>[1];
-    }) => updateMemo(id, input),
-    onMutate: ({ id, input }) =>
-      optimisticallyPatchMemo(queryClient, id, memoPatchFromUpdate(input)),
-    onSuccess: () => {
-      toast.success(t("toast.updated"));
-    },
-    onError: (error, _variables, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const hardDeleteMutation = useMutation({
-    mutationFn: hardDeleteMemo,
-    onMutate: (id) => optimisticallyPatchMemo(queryClient, id, null),
-    onSuccess: () => {
-      toast.success(t("toast.deleted"));
-    },
-    onError: (error, _id, snapshot) => {
-      restoreMemoSnapshot(queryClient, snapshot);
-      handleMutationError(error);
-    },
-    onSettled: () => void invalidateWorkspace(),
-  });
-
-  const shareMutation = useMutation({
-    mutationFn: createShare,
-    onSuccess: (share) => {
-      setSharesByMemo((current) => new Map(current).set(share.memo, share));
-      toast.success(t("toast.shareCreated"));
-    },
-    onError: handleMutationError,
+  const { handleExport, handleImportFile } = useDataTransfer({
+    handleMutationError,
+    invalidateWorkspace,
   });
 
   const flushQueuedCaptures = useCallback(async () => {
@@ -549,67 +358,7 @@ function FlareMoApp() {
     }
   };
 
-  const handleExport = async () => {
-    try {
-      const { task } = await createExportTask();
-      toast.success(t("toast.exportStarted"));
-      const finished = await pollDataTask(task.id);
-      if (finished.status !== "succeeded") {
-        toast.error(
-          t("toast.exportFailed", {
-            message: finished.error_message ?? finished.status,
-          }),
-        );
-        return;
-      }
-      const blob = await downloadExportJson(finished.id);
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `flaremo-export-${new Date().toISOString()}.json`;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      toast.success(t("toast.exportDone"));
-    } catch (error) {
-      handleMutationError(error);
-    }
-  };
-
-  const handleImportFile = async (bundle: unknown) => {
-    try {
-      const { task, result } = await createImportTask({ bundle });
-      toast.success(t("toast.importStarted"));
-      if (task.status !== "succeeded") {
-        toast.error(
-          t("toast.importFailed", {
-            message: task.error_message ?? task.status,
-          }),
-        );
-        return;
-      }
-      toast.success(t("toast.importDone", { count: result.imported_memos }));
-      void invalidateWorkspace();
-    } catch (error) {
-      handleMutationError(error);
-    }
-  };
-
-  const pollDataTask = async (id: string) => {
-    for (;;) {
-      const { task } = await getDataTask(id);
-      if (
-        task.status === "succeeded" ||
-        task.status === "failed" ||
-        task.status === "expired"
-      ) {
-        return task;
-      }
-      toast(t("toast.taskPending"), { id: "data-task-pending" });
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-  };
-
-  const renderExplorer = (importInputId: string) => (
+  const renderExplorer = (importInputId: string, onNavigate?: () => void) => (
     <FlareMoExplorer
       activeTag={activeTag}
       activeView={view}
@@ -623,7 +372,11 @@ function FlareMoApp() {
             size="icon-sm"
             variant="ghost"
           >
-            <Link title={t("auth.accountTitle")} to="/account">
+            <Link
+              onClick={onNavigate}
+              title={t("auth.accountTitle")}
+              to="/account"
+            >
               <SettingsIcon />
             </Link>
           </Button>
@@ -687,6 +440,7 @@ function FlareMoApp() {
       onTagChange={setActiveTag}
       onUntaggedChange={setUntagged}
       onViewChange={setView}
+      onNavigate={onNavigate}
     />
   );
 
@@ -706,7 +460,7 @@ function FlareMoApp() {
             )}
           >
             <div className="flex h-14 items-center gap-2 px-5 lg:px-3">
-              <Sheet>
+              <Sheet open={mobileSheetOpen} onOpenChange={setMobileSheetOpen}>
                 <SheetTrigger asChild>
                   <Button
                     aria-label={t("sidebar.toggle")}
@@ -728,7 +482,9 @@ function FlareMoApp() {
                     className="no-scrollbar h-full overflow-y-auto overscroll-contain"
                     data-testid="mobile-sidebar-scroll"
                   >
-                    {renderExplorer("flaremo-import-file-mobile")}
+                    {renderExplorer("flaremo-import-file-mobile", () =>
+                      setMobileSheetOpen(false),
+                    )}
                   </div>
                 </SheetContent>
               </Sheet>
@@ -739,23 +495,17 @@ function FlareMoApp() {
                 <div className="truncate px-1.5 py-1 text-sm font-semibold">
                   {query.trim() ? t("search.results") : viewTitle(view, t)}
                 </div>
-                {activeTag && (
-                  <button
-                    className="truncate rounded-md px-1.5 py-1 text-sm text-muted-foreground motion-safe:transition-colors hover:bg-muted"
-                    type="button"
-                    onClick={() => setActiveTag(undefined)}
-                  >
-                    #{activeTag}
-                  </button>
-                )}
               </div>
               <SearchBox
                 className="hidden w-[243px] md:block"
                 inputRef={desktopSearchRef}
-                onToggleSemantic={() => setSemanticMode((value) => !value)}
+                onToggleSemantic={
+                  semanticEnabled
+                    ? () => setSemanticMode((value) => !value)
+                    : undefined
+                }
                 query={query}
                 semanticMode={semanticMode}
-                showShortcut
                 setQuery={setQuery}
                 t={t}
               />
@@ -770,7 +520,11 @@ function FlareMoApp() {
             <SearchBox
               className="mb-3 md:hidden motion-safe:animate-rise"
               inputRef={mobileSearchRef}
-              onToggleSemantic={() => setSemanticMode((value) => !value)}
+              onToggleSemantic={
+                semanticEnabled
+                  ? () => setSemanticMode((value) => !value)
+                  : undefined
+              }
               query={query}
               semanticMode={semanticMode}
               setQuery={setQuery}
@@ -818,13 +572,13 @@ function FlareMoApp() {
                   {t("search.syntaxHint")}
                 </p>
               )}
-              {semanticMode && query.trim() && !semanticDegraded && (
-                <p className="-mt-1 text-xs text-muted-foreground">
-                  {t("search.semanticEmpty")}
-                </p>
-              )}
               <MemoList
                 attachmentsByMemo={attachmentsByMemo}
+                emptyDescription={
+                  semanticMode && debouncedQuery
+                    ? t("search.semanticEmpty")
+                    : undefined
+                }
                 hasError={
                   semanticMode
                     ? semanticResultsQuery.isError
@@ -890,7 +644,6 @@ function SearchBox({
   className,
   inputRef,
   query,
-  showShortcut = false,
   semanticMode = false,
   onToggleSemantic,
   setQuery,
@@ -899,7 +652,6 @@ function SearchBox({
   className: string;
   inputRef?: RefObject<HTMLInputElement | null>;
   query: string;
-  showShortcut?: boolean;
   semanticMode?: boolean;
   onToggleSemantic?: () => void;
   setQuery: (value: string) => void;
@@ -938,149 +690,9 @@ function SearchBox({
             <SparklesIcon className="size-4" />
           </button>
         )}
-        {showShortcut && !onToggleSemantic && (
-          <kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-md border bg-card px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-xs">
-            ⌘K
-          </kbd>
-        )}
       </div>
     </div>
   );
-}
-
-async function createMemoWithAttachments(input: MemoCaptureInput) {
-  const memo = await createMemo({
-    content: input.content,
-    visibility: input.visibility,
-    payload: { tags: input.tags, client_id: input.clientId },
-    source: "web",
-  });
-
-  // A mobile queue can hold many large files. Upload them in order so a
-  // transient failure stops early, and each retry only replays stable ids.
-  for (const [index, file] of input.files.entries()) {
-    await uploadAttachment({
-      file,
-      memo: memo.name,
-      clientId: getAttachmentCaptureClientId(input.clientId, index),
-    });
-  }
-
-  return memo;
-}
-
-function getAttachmentCaptureClientId(
-  memoClientId: string | undefined,
-  index: number,
-) {
-  if (!memoClientId) return undefined;
-  const clientId = `${memoClientId}:attachment:${index}`;
-  return clientId.length <= 128 ? clientId : undefined;
-}
-
-function toError(error: unknown) {
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-function shouldQueueAfterFailure(error: unknown) {
-  // Queue only when the request never received a meaningful answer (network
-  // failure, timeout, rate limit). A server error response is surfaced to
-  // the user instead, with the draft kept intact for an explicit retry.
-  if (!(error instanceof ApiError)) return true;
-  return error.status === 408 || error.status === 429;
-}
-
-function shouldContinueQueuedSubmissionAfterFailure(error: unknown) {
-  return (
-    error instanceof ApiError &&
-    error.status >= 400 &&
-    error.status < 500 &&
-    error.status !== 408 &&
-    error.status !== 429
-  );
-}
-
-function validateMemoCaptureSubmission(
-  input: MemoCaptureInput,
-  t: (key: TranslationKey) => string,
-) {
-  if (input.content.length > 100_000) {
-    return new Error(t("toast.memoTooLong"));
-  }
-  if (input.files.length > 100) {
-    return new Error(t("toast.tooManyAttachments"));
-  }
-  if (input.files.some((file) => file.size > 25 * 1024 * 1024)) {
-    return new Error(t("toast.attachmentTooLarge"));
-  }
-  return undefined;
-}
-
-type MemoSnapshot = Array<
-  [QueryKey, InfiniteData<ListMemosResponse> | undefined]
->;
-
-async function optimisticallyPatchMemo(
-  queryClient: QueryClient,
-  id: string,
-  patch: Partial<Memo> | null,
-): Promise<MemoSnapshot> {
-  await queryClient.cancelQueries({ queryKey: ["memos"] });
-  const snapshots = queryClient.getQueriesData<InfiniteData<ListMemosResponse>>(
-    {
-      queryKey: ["memos"],
-    },
-  );
-
-  for (const [queryKey, data] of snapshots) {
-    if (!data) continue;
-    const view = queryKey[1] as ViewMode | undefined;
-    queryClient.setQueryData<InfiniteData<ListMemosResponse>>(queryKey, {
-      ...data,
-      pages: data.pages.map((page) => ({
-        ...page,
-        memos: page.memos.flatMap((memo) => {
-          if (memo.id !== id && memo.name !== id) return [memo];
-          if (!patch) return [];
-          const next = {
-            ...memo,
-            ...patch,
-            update_time: new Date().toISOString(),
-          };
-          return view && next.state !== viewToMemoState(view) ? [] : [next];
-        }),
-      })),
-    });
-  }
-
-  return snapshots;
-}
-
-function restoreMemoSnapshot(
-  queryClient: QueryClient,
-  snapshot: MemoSnapshot | undefined,
-) {
-  for (const [queryKey, data] of snapshot ?? []) {
-    queryClient.setQueryData(queryKey, data);
-  }
-}
-
-function memoPatchFromUpdate(
-  input: Parameters<typeof updateMemo>[1],
-): Partial<Memo> {
-  return {
-    ...(input.content !== undefined ? { content: input.content } : {}),
-    ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
-    ...(input.status !== undefined ? { state: input.status } : {}),
-    ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-    ...(input.payload !== undefined ? { payload: input.payload } : {}),
-  };
-}
-
-function viewToMemoState(view: ViewMode): MemoState {
-  if (view === "archived") return "archived";
-  if (view === "trashed") return "trashed";
-  return "normal";
 }
 
 function viewTitle(view: ViewMode, t: (key: TranslationKey) => string) {
@@ -1094,368 +706,6 @@ function viewTitle(view: ViewMode, t: (key: TranslationKey) => string) {
   }
 }
 
-const rootRoute = createRootRoute({
-  component: () => <Outlet />,
-  errorComponent: RouteErrorPage,
-});
-
-const indexRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/",
-  component: ProtectedWorkspaceRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    view: isViewMode(search.view) ? search.view : undefined,
-    q: typeof search.q === "string" && search.q ? search.q : undefined,
-    tag: typeof search.tag === "string" && search.tag ? search.tag : undefined,
-    untagged:
-      search.untagged === true || search.untagged === "true" ? true : undefined,
-  }),
-});
-
-function PublicShareRoutePage() {
-  const { token } = shareRoute.useParams();
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <PublicSharePage token={token} />
-    </Suspense>
-  );
-}
-
-const shareRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/share/$token",
-  component: PublicShareRoutePage,
-});
-
-function MemoDetailRoutePage() {
-  const { memoId } = memoRoute.useParams();
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <MemoDetailPage memoId={memoId} />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const memoRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/memo/$memoId",
-  component: MemoDetailRoutePage,
-});
-
-function ProtectedWorkspaceRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <FlareMoApp />
-    </AuthenticatedRoute>
-  );
-}
-
-function LoginRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <LoginPage />
-    </Suspense>
-  );
-}
-
-const loginRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/login",
-  component: LoginRoutePage,
-});
-
-function RegisterRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <RegisterPage />
-    </Suspense>
-  );
-}
-
-const registerRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/register",
-  component: RegisterRoutePage,
-});
-
-function VerifyEmailRoutePage() {
-  const { token } = verifyEmailRoute.useSearch();
-  if (!token) {
-    return (
-      <Suspense fallback={<RouteLoading />}>
-        <VerifyEmailPage token="" />
-      </Suspense>
-    );
-  }
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <VerifyEmailPage token={token} />
-    </Suspense>
-  );
-}
-
-const verifyEmailRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/verify-email",
-  component: VerifyEmailRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
-});
-
-function ForgotPasswordRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <ForgotPasswordPage />
-    </Suspense>
-  );
-}
-
-const forgotPasswordRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/forgot-password",
-  component: ForgotPasswordRoutePage,
-});
-
-function VerifyEmailChangeRoutePage() {
-  const { token } = verifyEmailChangeRoute.useSearch();
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <VerifyEmailChangePage token={token ?? ""} />
-    </Suspense>
-  );
-}
-
-const verifyEmailChangeRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/verify-email-change",
-  component: VerifyEmailChangeRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
-});
-
-function ResetRoutePage() {
-  const { token } = resetRoute.useSearch();
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <ResetPage token={token} />
-    </Suspense>
-  );
-}
-
-const resetRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/reset",
-  component: ResetRoutePage,
-  validateSearch: (search: Record<string, unknown>) => ({
-    token: typeof search.token === "string" ? search.token : undefined,
-  }),
-});
-
-function RecoverRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <RecoverPage />
-    </Suspense>
-  );
-}
-
-const recoverRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/recover",
-  component: RecoverRoutePage,
-});
-
-function SetupRoutePage() {
-  return (
-    <Suspense fallback={<RouteLoading />}>
-      <SetupPage />
-    </Suspense>
-  );
-}
-
-const setupRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/setup",
-  component: SetupRoutePage,
-});
-
-function AccountRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <AccountPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const accountRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/account",
-  component: AccountRoutePage,
-});
-
-function DailyReviewRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <DailyReviewPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const dailyReviewRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/review/daily",
-  component: DailyReviewRoutePage,
-});
-
-function RandomWalkRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <RandomWalkPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const randomWalkRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/review/walk",
-  component: RandomWalkRoutePage,
-});
-
-function MemoryRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <MemoryPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const memoryRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/memory",
-  component: MemoryRoutePage,
-});
-
-function ProjectsRoutePage() {
-  return (
-    <AuthenticatedRoute>
-      <Suspense fallback={<RouteLoading />}>
-        <ProjectsPage />
-      </Suspense>
-    </AuthenticatedRoute>
-  );
-}
-
-const projectsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/projects",
-  component: ProjectsRoutePage,
-});
-
-function AuthenticatedRoute({ children }: { children: ReactNode }) {
-  const queryClient = useQueryClient();
-  const session = authClient.useSession();
-  const [authenticationRequired, setAuthenticationRequired] = useState(false);
-
-  useEffect(() => {
-    const handleAuthenticationRequired = () => {
-      queryClient.clear();
-      setAuthenticationRequired(true);
-    };
-    window.addEventListener(
-      AUTHENTICATION_REQUIRED_EVENT,
-      handleAuthenticationRequired,
-    );
-    return () =>
-      window.removeEventListener(
-        AUTHENTICATION_REQUIRED_EVENT,
-        handleAuthenticationRequired,
-      );
-  }, [queryClient]);
-
-  if (session.isPending) {
-    return <RouteLoading />;
-  }
-  if (authenticationRequired || !session.data?.user) {
-    return <Navigate replace to="/login" />;
-  }
-  return children;
-}
-
-function RouteErrorPage({ error }: { error: Error }) {
-  const { t } = useI18n();
-  const router = useRouter();
-  return (
-    <main className="mx-auto flex min-h-svh w-full max-w-xl flex-col items-center justify-center gap-4 px-5 text-center">
-      <div>
-        <h1 className="text-lg font-semibold">{t("list.errorTitle")}</h1>
-        <p className="mt-1 text-sm text-muted-foreground">{error.message}</p>
-      </div>
-      <Button onClick={() => void router.invalidate()}>
-        {t("common.retry")}
-      </Button>
-    </main>
-  );
-}
-
-function RouteLoading() {
-  const { t } = useI18n();
-  return (
-    <main className="flex min-h-svh items-center justify-center text-sm text-muted-foreground">
-      {t("common.loading")}
-    </main>
-  );
-}
-
-function isViewMode(value: unknown): value is ViewMode {
-  return value === "all" || value === "archived" || value === "trashed";
-}
-
-const router = createRouter({
-  defaultPreload: "intent",
-  routeTree: rootRoute.addChildren([
-    indexRoute,
-    memoRoute,
-    shareRoute,
-    loginRoute,
-    registerRoute,
-    verifyEmailRoute,
-    forgotPasswordRoute,
-    verifyEmailChangeRoute,
-    resetRoute,
-    recoverRoute,
-    setupRoute,
-    accountRoute,
-    dailyReviewRoute,
-    randomWalkRoute,
-    memoryRoute,
-    projectsRoute,
-  ]),
-  scrollRestoration: true,
-});
-
-declare module "@tanstack/react-router" {
-  interface Register {
-    router: typeof router;
-  }
-}
-
 export default function App() {
-  return (
-    <TooltipProvider>
-      <RouterProvider router={router} />
-      <Toaster />
-    </TooltipProvider>
-  );
+  return <AppRoutes />;
 }

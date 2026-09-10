@@ -1,8 +1,9 @@
 import { FLAREMO_API_VERSION } from "@flaremo/contracts";
-import type { UserRow } from "@flaremo/db";
+import type { MemoRow, UserRow } from "@flaremo/db";
 import { createDb } from "@flaremo/db";
 import {
   assertAttachmentStorageQuota,
+  beginFlaremoMemberRemoval,
   bindMemoAttachments,
   compileAttachmentFilter,
   createAttachmentMetadata,
@@ -13,13 +14,13 @@ import {
   createShortcut,
   createUserWebhook,
   type DomainError,
-  deleteFlaremoUser,
   deleteMemoReaction,
   deleteShortcut,
   deleteUserNotification,
   deleteUserWebhook,
   ForbiddenError,
   finalizeAttachmentDelete,
+  finalizeFlaremoMemberRemoval,
   getAttachmentById,
   getAuthBootstrapStatus,
   getAuthUserById,
@@ -36,6 +37,9 @@ import {
   getUserRegistrationAllowed,
   getUserWebhookSigningSecret,
   hardDeleteMemo,
+  isOwner,
+  isTeamAdmin,
+  listAttachmentsForMemosForViewer,
   listAttachmentsPage,
   listFlaremoUsers,
   listMemoAttachments,
@@ -47,6 +51,8 @@ import {
   listMemos,
   listMemosForViewer,
   listMemosPersonalAccessTokens,
+  listMemoTotalsByUser,
+  listReactionsForMemosForViewer,
   listShortcuts,
   listUserNotifications,
   listUserWebhooks,
@@ -80,6 +86,7 @@ import {
   publicUserToDto,
 } from "@flaremo/memos";
 import { type Context, Hono } from "hono";
+import { cleanupFlaremoArtifacts } from "../artifact-cleanup";
 import {
   createAttachmentObjectKey,
   MAX_ATTACHMENT_BYTES,
@@ -89,6 +96,7 @@ import { verifyCaptchaRequest } from "../captcha";
 import {
   assertRequestCredentialBoundary,
   assertTrustedCookieMutation,
+  getFlareMoRuntime,
   getOptionalRequestContext,
   getRequestContext,
   type HonoBindings,
@@ -111,6 +119,7 @@ import {
   normalizeMemosJsonResponse,
   ProtoCodecError,
 } from "../memos-protobuf";
+import { rateLimitGuard } from "../rate-limit";
 
 /**
  * Connect's JSON protocol is HTTP unary RPC: the request and response body are
@@ -180,12 +189,6 @@ memosConnectApi.post("/:service/:method", async (c) => {
     ) {
       return await connectGetSharedMemo(c, body, binaryTransport);
     }
-    if (service === memoService && method === "GetLinkMetadata") {
-      return await connectGetLinkMetadata(c, body, binaryTransport);
-    }
-    if (service === memoService && method === "BatchGetLinkMetadata") {
-      return await connectBatchGetLinkMetadata(c, body, binaryTransport);
-    }
     if (service === memoService && isPublicMemoReadMethod(method)) {
       return await connectPublicMemoRead(
         c,
@@ -221,6 +224,13 @@ memosConnectApi.post("/:service/:method", async (c) => {
       );
     }
     const context = await getRequestContext(c);
+    // Server-side URL fetching is a probing primitive; keep it behind auth.
+    if (service === memoService && method === "GetLinkMetadata") {
+      return await connectGetLinkMetadata(c, body, binaryTransport);
+    }
+    if (service === memoService && method === "BatchGetLinkMetadata") {
+      return await connectBatchGetLinkMetadata(c, body, binaryTransport);
+    }
     if (service === "memos.api.v1.AuthService" && method === "GetCurrentUser") {
       const authUser = await getAuthUserForContext(context);
       return connectValue(
@@ -641,11 +651,9 @@ async function connectUserMethod(
       const filter = optionalString(body.filter);
       const users = await Promise.all(
         (await listFlaremoUsers(context.db)).map(async (user) =>
-          connectUserToDto(
-            context.db,
-            user,
-            user.id === context.user.id ? authUser : undefined,
-          ),
+          user.id === context.user.id
+            ? connectUserToDto(context.db, user, authUser)
+            : connectPublicUserToDto(context.db, user),
         ),
       );
       const matched = filter
@@ -663,11 +671,9 @@ async function connectUserMethod(
       );
       const all = await Promise.all(
         (await listFlaremoUsers(context.db)).map(async (user) =>
-          connectUserToDto(
-            context.db,
-            user,
-            user.id === context.user.id ? authUser : undefined,
-          ),
+          user.id === context.user.id
+            ? connectUserToDto(context.db, user, authUser)
+            : connectPublicUserToDto(context.db, user),
         ),
       );
       const users =
@@ -679,15 +685,14 @@ async function connectUserMethod(
     case "GetUser": {
       const user = await getUserByName(context.db, body.name);
       if (!user) throw new ConnectInputError("User not found");
-      const dto = await connectUserToDto(
-        context.db,
-        user,
-        user.id === context.user.id ? authUser : undefined,
-      );
+      const dto =
+        user.id === context.user.id
+          ? await connectUserToDto(context.db, user, authUser)
+          : await connectPublicUserToDto(context.db, user);
       return connectValue(c, dto, transport);
     }
     case "CreateUser": {
-      if (context.credential === "pat" || context.user.role !== "owner") {
+      if (context.credential === "pat" || !isOwner(context.user)) {
         return connectErrorForTransport(
           c,
           transport,
@@ -723,7 +728,7 @@ async function connectUserMethod(
       return connectValue(c, created.dto, transport);
     }
     case "DeleteUser": {
-      if (context.credential === "pat" || context.user.role !== "owner") {
+      if (context.credential === "pat" || !isOwner(context.user)) {
         return connectErrorForTransport(
           c,
           transport,
@@ -737,7 +742,9 @@ async function connectUserMethod(
       if (target.id === context.user.id) {
         throw new ConnectInputError("You cannot delete your own account");
       }
-      await deleteFlaremoUser(context.db, target.id);
+      const artifacts = await beginFlaremoMemberRemoval(context.db, target.id);
+      await cleanupFlaremoArtifacts(c.env, artifacts);
+      await finalizeFlaremoMemberRemoval(context.db, target.id, artifacts);
       return connectValue(c, {}, transport);
     }
     case "UpdateUser": {
@@ -791,15 +798,38 @@ async function connectUserMethod(
       );
     }
     case "ListAllUserStats": {
-      const users = await listFlaremoUsers(context.db);
-      const stats = await Promise.all(
-        users.map(async (user) =>
-          userStatsFromMemoStats(
-            user.id,
-            await getMemoStats(context.db, user, { time_zone: "UTC" }),
-          ),
-        ),
-      );
+      // Team-wide stats are an administrative view; a member must not be able
+      // to profile the whole instance.
+      if (!isTeamAdmin(context.user)) {
+        return connectErrorForTransport(
+          c,
+          transport,
+          "permission_denied",
+          "A team administrator is required to list all user stats",
+          403,
+        );
+      }
+      const [users, totals] = await Promise.all([
+        listFlaremoUsers(context.db),
+        listMemoTotalsByUser(context.db),
+      ]);
+      const stats = users.map((user) => {
+        const entry = totals.get(user.id);
+        return {
+          name: user.id,
+          memoTypeStats: {
+            linkCount: 0,
+            codeCount: 0,
+            todoCount: 0,
+            undoCount: 0,
+          },
+          tagCount: Object.fromEntries(entry?.tags ?? []),
+          totalMemoCount: entry?.total ?? 0,
+          pinnedMemos: [],
+          memoCreatedTimestamps: [],
+          memoUpdatedTimestamps: [],
+        };
+      });
       return connectValue(c, { stats }, transport);
     }
     case "GetUserSetting": {
@@ -929,7 +959,7 @@ async function connectUserMethod(
       ).find((item) => item.id === tokenId);
       if (!token)
         throw new ConnectInputError("Personal access token not found");
-      await createFlareMoAuth(c.env, context.db).api.updateApiKey({
+      await getFlareMoRuntime(c.env).auth.api.updateApiKey({
         body: {
           configId: "memos",
           keyId: token.id,
@@ -1194,7 +1224,7 @@ async function connectInstanceMethod(
       return connectValue(c, { settings }, transport);
     }
     case "UpdateInstanceSetting": {
-      if (context.credential === "pat" || context.user.role !== "owner") {
+      if (context.credential === "pat" || !isOwner(context.user)) {
         return connectErrorForTransport(
           c,
           transport,
@@ -1302,9 +1332,7 @@ async function listConnectMemoComments(
       : {}),
     orderBy: optionalString(body.orderBy) ?? "create_time desc",
   });
-  const comments = await Promise.all(
-    result.memos.map((memo) => connectMemoWithDetails(context, memo.id)),
-  );
+  const comments = await hydrateConnectMemos(context, result.memos);
   return {
     memos: comments,
     totalSize: result.totalSize,
@@ -1454,11 +1482,7 @@ async function connectPublicMemoRead(
         filter: optionalString(body.filter),
         include_deleted: body.showDeleted === true,
       });
-      const memos = await Promise.all(
-        result.memos.map((memo) =>
-          connectPublicMemoWithDetails(context, memo.id),
-        ),
-      );
+      const memos = await hydrateConnectPublicMemos(context, result.memos);
       return connectValue(
         c,
         {
@@ -1489,10 +1513,10 @@ async function connectPublicMemoRead(
           : {}),
         orderBy: optionalString(body.orderBy) ?? "create_time desc",
       });
-      const memos = await Promise.all(
-        result.memos.map((memo) =>
-          connectPublicMemoWithDetails(context, memo.id, parentName),
-        ),
+      const memos = await hydrateConnectPublicMemos(
+        context,
+        result.memos,
+        parentName,
       );
       return connectValue(
         c,
@@ -1935,40 +1959,157 @@ async function connectMemoWithDetails(
   });
 }
 
+function groupByContentMemo<T>(
+  rows: T[],
+  memoKey: (row: T) => string | null | undefined,
+): Map<string, T[]> {
+  const grouped = new Map<string, T[]>();
+  for (const row of rows) {
+    const memoId = memoKey(row);
+    if (!memoId) continue;
+    const bucket = grouped.get(memoId) ?? [];
+    bucket.push(row);
+    grouped.set(memoId, bucket);
+  }
+  return grouped;
+}
+
 async function listMemoAttachmentsForPage(
   context: Awaited<ReturnType<typeof getRequestContext>>,
   memoIds: string[],
 ) {
-  const result = new Map<
-    string,
-    Awaited<ReturnType<typeof listMemoAttachments>>
-  >();
-  await Promise.all(
-    memoIds.map(async (id) => {
-      result.set(id, await listMemoAttachments(context.db, context.user, id));
-    }),
+  const attachments = await listAttachmentsForMemosForViewer(
+    context.db,
+    context.user,
+    memoIds,
   );
-  return result;
+  return groupByContentMemo(attachments, (attachment) => attachment.memoId);
 }
 
 async function listMemoReactionsForPage(
   context: Awaited<ReturnType<typeof getRequestContext>>,
   memoIds: string[],
 ) {
-  const result = new Map<
-    string,
-    Awaited<ReturnType<typeof listMemoReactions>>["reactions"]
-  >();
-  await Promise.all(
-    memoIds.map(async (id) => {
-      const page = await listMemoReactions(context.db, context.user, {
-        memoName: id,
-        pageSize: 1_000,
+  const reactions = await listReactionsForMemosForViewer(
+    context.db,
+    context.user,
+    memoIds,
+  );
+  return groupByContentMemo(reactions, (reaction) => reaction.contentId);
+}
+
+/**
+ * Hydrate a page of already-scoped memo rows without re-fetching each memo:
+ * attachments and reactions are resolved with one batched query per page,
+ * while relations and the comment parent stay per-memo because most memos
+ * carry none. Keeps the exact DTO shape of the former per-memo detail fetch.
+ */
+async function hydrateConnectMemos(
+  context: Awaited<ReturnType<typeof getRequestContext>>,
+  memoRows: MemoRow[],
+) {
+  const ids = memoRows.map((memo) => memo.id);
+  const [attachments, reactions] = await Promise.all([
+    listMemoAttachmentsForPage(context, ids),
+    listMemoReactionsForPage(context, ids),
+  ]);
+  return Promise.all(
+    memoRows.map(async (memo) => {
+      const relationRows = await listMemoRelationsForViewer(
+        context.db,
+        context.user,
+        memo.id,
+      );
+      const relations = await Promise.all(
+        relationRows.map(async (row) => {
+          const [relationMemo, relatedMemo] = await Promise.all([
+            getMemoById(context.db, context.user, row.memoId, {
+              includeDeleted: true,
+            }),
+            getMemoById(context.db, context.user, row.relatedMemoId, {
+              includeDeleted: true,
+            }),
+          ]);
+          return currentRelationToDto(row, relationMemo, relatedMemo);
+        }),
+      );
+      const parent = await getMemoParent(context.db, context.user, memo.id);
+      return currentMemoToDto(memo, context.user, {
+        attachments: attachments.get(memo.id) ?? [],
+        reactions: reactions.get(memo.id) ?? [],
+        relations,
+        parent,
       });
-      result.set(id, page.reactions);
     }),
   );
-  return result;
+}
+
+/**
+ * Anonymous-capable variant for the public Memos read surface, mirroring
+ * connectPublicMemoWithDetails but resolving a page in two batched queries
+ * plus per-memo relation lookups, with creators cached across the page.
+ */
+async function hydrateConnectPublicMemos(
+  context: ConnectReadContext,
+  memoRows: MemoRow[],
+  parent?: string,
+) {
+  const ids = memoRows.map((memo) => memo.id);
+  const [attachmentsByMemo, reactionsByMemo] = await Promise.all([
+    listAttachmentsForMemosForViewer(context.db, context.user, ids),
+    listReactionsForMemosForViewer(context.db, context.user, ids),
+  ]);
+  const attachments = groupByContentMemo(
+    attachmentsByMemo,
+    (attachment) => attachment.memoId,
+  );
+  const reactions = groupByContentMemo(
+    reactionsByMemo,
+    (reaction) => reaction.contentId,
+  );
+  const creators = new Map<string, UserRow>();
+  return Promise.all(
+    memoRows.map(async (memo) => {
+      const relationRows = await listMemoRelationsForViewer(
+        context.db,
+        context.user,
+        memo.id,
+      );
+      const relations = (
+        await Promise.all(
+          relationRows.map(async (relation) => {
+            try {
+              const [relationMemo, relatedMemo] = await Promise.all([
+                getMemoByIdForViewer(context.db, context.user, relation.memoId),
+                getMemoByIdForViewer(
+                  context.db,
+                  context.user,
+                  relation.relatedMemoId,
+                ),
+              ]);
+              return currentRelationToDto(relation, relationMemo, relatedMemo);
+            } catch {
+              return null;
+            }
+          }),
+        )
+      ).filter(
+        (relation): relation is NonNullable<typeof relation> =>
+          relation !== null,
+      );
+      let creator = creators.get(memo.userId);
+      if (!creator) {
+        creator = await getMemoCreatorForViewer(context, memo);
+        creators.set(memo.userId, creator);
+      }
+      return currentMemoToDto(memo, creator, {
+        attachments: attachments.get(memo.id) ?? [],
+        reactions: reactions.get(memo.id) ?? [],
+        relations,
+        ...(parent ? { parent } : {}),
+      });
+    }),
+  );
 }
 
 function currentPayload(memo: Record<string, unknown>) {
@@ -2097,6 +2238,7 @@ function publicOwnerFallback(name: string | undefined): UserRow {
     name: name?.trim() || "Owner",
     avatarUrl: null,
     role: "owner",
+    status: "active",
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -2399,7 +2541,7 @@ async function updateBetterAuthUsername(
     headers,
     body: JSON.stringify({ username }),
   });
-  const response = await createFlareMoAuth(c.env, context.db).handler(request);
+  const response = await getFlareMoRuntime(c.env).auth.handler(request);
   if (response.ok) return;
   let message = "Better Auth rejected the username update";
   try {
@@ -2468,7 +2610,7 @@ function connectNotificationToDto(notification: UserNotificationDto) {
   const sender = notification.senderUser;
   const senderUser = {
     name: sender.id,
-    role: sender.role === "owner" ? "ADMIN" : "USER",
+    role: sender.role === "member" ? "USER" : "ADMIN",
     username: notification.senderUsername ?? sender.id.replace(/^users\//u, ""),
     email: notification.senderEmail ?? sender.email,
     displayName: sender.name,
@@ -2545,12 +2687,14 @@ async function connectAuthSignIn(
   transport?: BinaryTransport,
 ) {
   try {
+    // Credential brute-force surface: same per-IP edge bucket as /api/auth/*.
+    const throttled = await rateLimitGuard(c, "auth");
+    if (throttled) return throttled;
     assertTrustedCookieMutation(c);
     const credentials = record(record(value).passwordCredentials);
     const username = requiredString(credentials.username, "username");
     const password = requiredString(credentials.password, "password");
-    const db = createDb(c.env.DB);
-    const auth = createFlareMoAuth(c.env, db);
+    const { db, auth } = getFlareMoRuntime(c.env);
     const result = await auth.api.signInUsername({
       body: { username, password, rememberMe: true },
       headers: c.req.raw.headers,
@@ -2668,7 +2812,7 @@ async function connectAuthSignOut(
     if (c.req.raw.headers.get("cookie")) {
       const headers = new Headers(c.req.raw.headers);
       headers.delete("authorization");
-      const authResponse = await createFlareMoAuth(c.env, context.db).handler(
+      const authResponse = await getFlareMoRuntime(c.env).auth.handler(
         new Request(new URL("/api/auth/sign-out", c.req.url), {
           method: "POST",
           headers,
@@ -2830,6 +2974,20 @@ async function connectUserToDto(
     user,
     authUserId ? await getAuthUserById(db, authUserId) : null,
   );
+}
+
+/**
+ * Non-self user DTO: keeps the display fields (including the real username)
+ * but never the email — a member must not be able to enumerate teammates'
+ * email addresses through the Memos compatibility surface.
+ */
+async function connectPublicUserToDto(
+  db: ReturnType<typeof createDb>,
+  user: UserRow,
+) {
+  const authUserId = await getAuthUserIdByFlaremoUserId(db, user.id);
+  const authUser = authUserId ? await getAuthUserById(db, authUserId) : null;
+  return publicUserToDto(user, authUser?.username ?? undefined);
 }
 
 async function createConnectUser(

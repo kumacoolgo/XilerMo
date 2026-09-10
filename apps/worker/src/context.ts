@@ -3,6 +3,7 @@ import {
   ForbiddenError,
   getFlaremoUserByAuthSessionToken,
   getFlaremoUserByAuthUserId,
+  isActiveTeamMember,
   type PlanLimits,
   parseUserPlanLimits,
   SELF_HOST_UNLIMITED,
@@ -23,8 +24,9 @@ export type HonoBindings = {
   Variables: {
     /**
      * Resolved once per request by createFlareMoApp's limits middleware.
-     * Self-hosted deployments always carry SELF_HOST_UNLIMITED; hosted
-     * shells swap in a subscription-backed resolver via factory options.
+     * Self-hosted deployments always carry SELF_HOST_UNLIMITED; external
+     * composition shells swap in a subscription-backed resolver via factory
+     * options.
      */
     planLimits: PlanLimits;
     /**
@@ -39,8 +41,6 @@ export type HonoBindings = {
   };
 };
 
-export type RequestCredential = "session" | "pat";
-
 /**
  * Per-user quota limits for the authenticated user. `null` = not configured;
  * only deployment-level limits (or none) apply.
@@ -54,10 +54,32 @@ async function resolveUserLimits(
   return resolve(c.env, userId);
 }
 
+// Better Auth assembles a complete instance per call (config resolution,
+// table maps, drizzle adapter). Its inputs — the env bindings and the D1
+// wrapper built from them — are stable for the life of an isolate, so keep
+// one pair per env object. Callers needing non-default options (bootstrap
+// sign-up) still build their own instance.
+const runtimeCache = new WeakMap<
+  FlareMoEnv,
+  {
+    db: ReturnType<typeof createDb>;
+    auth: ReturnType<typeof createFlareMoAuth>;
+  }
+>();
+
+export function getFlareMoRuntime(env: FlareMoEnv) {
+  let runtime = runtimeCache.get(env);
+  if (!runtime) {
+    const db = createDb(env.DB);
+    runtime = { db, auth: createFlareMoAuth(env, db) };
+    runtimeCache.set(env, runtime);
+  }
+  return runtime;
+}
+
 export async function getRequestContext(c: Context<HonoBindings>) {
-  const db = createDb(c.env.DB);
+  const { db, auth } = getFlareMoRuntime(c.env);
   const token = getBearerToken(c.req.raw.headers);
-  const auth = createFlareMoAuth(c.env, db);
 
   if (token) {
     assertTrustedBearerOrigin(c);
@@ -68,6 +90,7 @@ export async function getRequestContext(c: Context<HonoBindings>) {
         token,
       });
       if (nativeAccess) {
+        assertActiveMember(nativeAccess.user);
         return {
           db,
           user: nativeAccess.user,
@@ -83,6 +106,7 @@ export async function getRequestContext(c: Context<HonoBindings>) {
 
       const session = await getFlaremoUserByAuthSessionToken(db, token);
       if (!session) throw new UnauthorizedError();
+      assertActiveMember(session.user);
 
       return {
         db,
@@ -111,6 +135,7 @@ export async function getRequestContext(c: Context<HonoBindings>) {
       verification.key.referenceId,
     );
     if (!user) throw new UnauthorizedError();
+    assertActiveMember(user);
 
     return {
       db,
@@ -125,7 +150,7 @@ export async function getRequestContext(c: Context<HonoBindings>) {
     };
   }
 
-  return getBrowserRequestContext(c, { auth, db });
+  return getBrowserRequestContext(c);
 }
 
 /**
@@ -144,7 +169,7 @@ export async function getOptionalRequestContext(c: Context<HonoBindings>) {
       !c.req.raw.headers.has("cookie")
     ) {
       return {
-        db: createDb(c.env.DB),
+        db: getFlareMoRuntime(c.env).db,
         user: null,
         authUserId: null,
         credential: "anonymous" as const,
@@ -159,19 +184,12 @@ export async function getOptionalRequestContext(c: Context<HonoBindings>) {
   }
 }
 
-export async function getBrowserRequestContext(
-  c: Context<HonoBindings>,
-  supplied?: {
-    auth: ReturnType<typeof createFlareMoAuth>;
-    db: ReturnType<typeof createDb>;
-  },
-) {
+export async function getBrowserRequestContext(c: Context<HonoBindings>) {
   if (c.req.raw.headers.has("authorization")) {
     throw new UnauthorizedError();
   }
 
-  const db = supplied?.db ?? createDb(c.env.DB);
-  const auth = supplied?.auth ?? createFlareMoAuth(c.env, db);
+  const { db, auth } = getFlareMoRuntime(c.env);
   const session = await auth.api.getSession({
     headers: c.req.raw.headers,
   });
@@ -181,6 +199,7 @@ export async function getBrowserRequestContext(
 
   const user = await getFlaremoUserByAuthUserId(db, session.user.id);
   if (!user) throw new UnauthorizedError();
+  assertActiveMember(user);
 
   return {
     db,
@@ -243,6 +262,10 @@ function getBearerToken(headers: Headers): string | null {
     throw new UnauthorizedError();
   }
   return token;
+}
+
+function assertActiveMember(user: Parameters<typeof isActiveTeamMember>[0]) {
+  if (!isActiveTeamMember(user)) throw new UnauthorizedError();
 }
 
 export type ReturnTypeOfRequestContext = Awaited<

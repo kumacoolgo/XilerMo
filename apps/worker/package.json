@@ -1,7 +1,7 @@
 {
   "name": "@flaremo/worker",
   "license": "AGPL-3.0-only",
-  "version": "0.14.0",
+  "version": "0.15.3",
   "private": true,
   "type": "module",
   "main": "./src/index.ts",
@@ -24,7 +24,7 @@
     "@hono/zod-validator": "^0.7.6",
     "better-auth": "1.6.25",
     "drizzle-orm": "^0.45.1",
-    "hono": "^4.13.1",
+    "hono": "^4.13.5",
     "zod": "^4.1.12"
   },
   "devDependencies": {
@@ -32,7 +32,7 @@
     "@connectrpc/connect": "2.1.1",
     "@connectrpc/connect-web": "2.1.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.0",
+    "vitest": "^4.1.11",
     "wrangler": "^4.114.0"
   }
 }

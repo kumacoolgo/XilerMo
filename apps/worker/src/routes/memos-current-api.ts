@@ -2,14 +2,15 @@ import { createDb, type UserRow } from "@flaremo/db";
 import {
   assertAttachmentStorageQuota,
   assertMemberQuota,
+  beginFlaremoMemberRemoval,
   bindMemoAttachments,
   createAttachmentMetadata,
   createFlaremoMemberWithLink,
   createMemo,
   createMemoShare,
   type DomainError,
-  deleteFlaremoUser,
   finalizeAttachmentDelete,
+  finalizeFlaremoMemberRemoval,
   getAttachmentById,
   getAuthBootstrapStatus,
   getAuthUserById,
@@ -21,7 +22,7 @@ import {
   getMemosPersonalAccessToken,
   getPublicShareByToken,
   getUserRegistrationAllowed,
-  hardDeleteMemo,
+  isOwner,
   listAttachments,
   listAttachmentsForMemosForViewer,
   listFlaremoUsers,
@@ -45,9 +46,11 @@ import {
   currentShareToDto,
   currentUserToDto,
   legacyMemoState,
+  publicUserToDto,
 } from "@flaremo/memos";
 import { Hono } from "hono";
 import { z } from "zod";
+import { cleanupFlaremoArtifacts } from "../artifact-cleanup";
 import {
   createAttachmentObjectKey,
   MAX_ATTACHMENT_BYTES,
@@ -56,11 +59,13 @@ import { createFlareMoAuth } from "../auth";
 import { verifyCaptchaRequest } from "../captcha";
 import {
   assertTrustedCookieMutation,
+  getFlareMoRuntime,
   getOptionalRequestContext,
   getRequestContext,
   type HonoBindings,
 } from "../context";
 import { resolveEmailConfig } from "../email";
+import { hardDeleteMemoWithAttachments } from "../memo-hard-delete";
 import {
   authenticateMemosAccessToken,
   clearMemosRefreshCookie,
@@ -70,6 +75,7 @@ import {
   revokeMemosRefreshToken,
   rotateMemosRefreshToken,
 } from "../memos-native-auth";
+import { rateLimitGuard } from "../rate-limit";
 
 export const memosCurrentApi = new Hono<HonoBindings>();
 
@@ -190,6 +196,9 @@ memosCurrentApi.get("/auth/me", async (c, next) => {
 memosCurrentApi.post("/auth/signin", async (c, next) => {
   if (isLegacyWireRequest(c)) return next();
   try {
+    // Credential brute-force surface: same per-IP edge bucket as /api/auth/*.
+    const throttled = await rateLimitGuard(c, "auth");
+    if (throttled) return throttled;
     // This endpoint creates a browser cookie as well as returning the opaque
     // session-backed access token. Treat it as a cookie mutation even when a
     // Memos-compatible client chooses to use the bearer token afterward.
@@ -565,7 +574,12 @@ memosCurrentApi.delete("/memos/:memo", async (c, next) => {
     const context = await getRequestContext(c);
     const name = normalizeMemoName(c.req.param("memo"));
     if (c.req.query("force") === "true") {
-      await hardDeleteMemo(context.db, context.user, name);
+      await hardDeleteMemoWithAttachments(
+        c.env,
+        context.db,
+        context.user,
+        name,
+      );
     } else {
       await moveMemoToTrash(context.db, context.user, name);
     }
@@ -887,16 +901,21 @@ memosCurrentApi.get("/users", async (c, next) => {
   try {
     const context = await getRequestContext(c);
     const users = await listFlaremoUsers(context.db);
+    // Non-self entries keep their display fields but never the email — the
+    // compatibility surface must not become an email directory.
     const dtos = await Promise.all(
-      users.map(async (user) =>
-        currentUserToDto(
-          user,
-          await getAuthUserById(
-            context.db,
-            (await getAuthUserIdByFlaremoUserId(context.db, user.id)) ?? "",
-          ),
-        ),
-      ),
+      users.map(async (user) => {
+        const authUserId = await getAuthUserIdByFlaremoUserId(
+          context.db,
+          user.id,
+        );
+        const authUser = authUserId
+          ? await getAuthUserById(context.db, authUserId)
+          : null;
+        return user.id === context.user.id
+          ? currentUserToDto(user, authUser)
+          : publicUserToDto(user, authUser?.username ?? undefined);
+      }),
     );
     return c.json({ users: dtos });
   } catch (error) {
@@ -1035,11 +1054,13 @@ memosCurrentApi.get("/users/:user", async (c, next) => {
     const user = await getFlaremoUserById(context.db, userId);
     if (!user) throw new NotFoundCurrentError("User not found");
     const authUserId = await getAuthUserIdByFlaremoUserId(context.db, user.id);
+    const authUser = authUserId
+      ? await getAuthUserById(context.db, authUserId)
+      : null;
     return c.json(
-      currentUserToDto(
-        user,
-        authUserId ? await getAuthUserById(context.db, authUserId) : null,
-      ),
+      user.id === context.user.id
+        ? currentUserToDto(user, authUser)
+        : publicUserToDto(user, authUser?.username ?? undefined),
     );
   } catch (error) {
     return currentJsonError(c, error);
@@ -1055,7 +1076,9 @@ memosCurrentApi.delete("/users/:user", async (c, next) => {
     if (userId === context.user.id) {
       throw new ForbiddenCurrentError("You cannot delete your own account");
     }
-    await deleteFlaremoUser(context.db, userId);
+    const artifacts = await beginFlaremoMemberRemoval(context.db, userId);
+    await cleanupFlaremoArtifacts(c.env, artifacts);
+    await finalizeFlaremoMemberRemoval(context.db, userId, artifacts);
     return c.body(null, 200);
   } catch (error) {
     return currentJsonError(c, error);
@@ -1134,8 +1157,7 @@ async function currentUserForContext(context: {
 }
 
 async function createAuthContext(c: Parameters<typeof getRequestContext>[0]) {
-  const db = createDb(c.env.DB);
-  return { db, auth: createFlareMoAuth(c.env, db) };
+  return getFlareMoRuntime(c.env);
 }
 
 function assertSessionCredential(
@@ -1150,7 +1172,7 @@ function assertSessionCredential(
 function assertOwnerUser(
   context: Awaited<ReturnType<typeof getRequestContext>>,
 ) {
-  if (context.credential === "pat" || context.user.role !== "owner") {
+  if (context.credential === "pat" || !isOwner(context.user)) {
     throw new ForbiddenCurrentError(
       "An owner session is required for user management",
     );
@@ -1527,8 +1549,14 @@ function currentErrorMessage(error: unknown) {
   if (isDomainError(error)) return error.message;
   if (isBetterAuthCredentialError(error))
     return "unmatched username and password";
-  if (isRecord(error) && typeof error.message === "string")
-    return error.message;
+  // Framework errors (Better Auth, transport codecs) carry controlled,
+  // caller-facing messages alongside their status. Everything else without a
+  // domain type — D1 failures, TypeErrors — stays generic so internal
+  // details never reach the response body.
+  if (isRecord(error) && controlledErrorStatus(error) !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message) return message;
+  }
   if (isRecord(error) && Array.isArray(error.issues)) {
     return error.issues
       .map((issue) =>
@@ -1539,6 +1567,16 @@ function currentErrorMessage(error: unknown) {
       .join("; ");
   }
   return "Internal server error";
+}
+
+function controlledErrorStatus(error: Record<string, unknown>): number | null {
+  const status =
+    typeof error.statusCode === "number"
+      ? error.statusCode
+      : typeof error.status === "number"
+        ? error.status
+        : null;
+  return status !== null && status < 500 ? status : null;
 }
 
 function isBetterAuthCredentialError(error: unknown) {

@@ -8,6 +8,11 @@ export default defineConfig({
     timeout: 10_000,
   },
   fullyParallel: false,
+  // Every project shares one wrangler dev server and one auth state, so
+  // parallel workers contend for the same D1 write lock — that contention is
+  // what made the heaviest memo-flow case flake under load. Keep the run
+  // serial; 24 cases stay comfortably fast this way.
+  workers: 1,
   reporter: [["list"]],
   globalSetup: "./tests/e2e/global-setup.ts",
   globalTeardown: "./tests/e2e/global-teardown.ts",
@@ -24,7 +29,7 @@ export default defineConfig({
     {
       name: "auth-ui",
       dependencies: ["auth-contract"],
-      testMatch: /auth-ui-flow\.spec\.ts/,
+      testMatch: /(auth-ui-flow|auth-redirect)\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         storageState: E2E_AUTH_STATE,
@@ -43,7 +48,7 @@ export default defineConfig({
   webServer: {
     command: "node ./scripts/e2e-server.mjs",
     gracefulShutdown: { signal: "SIGTERM", timeout: 5_000 },
-    url: "http://127.0.0.1:18787",
+    url: E2E_BASE_URL,
     timeout: 180_000,
     reuseExistingServer: false,
   },

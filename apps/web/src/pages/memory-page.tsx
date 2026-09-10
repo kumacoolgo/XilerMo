@@ -1,18 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import {
   ArchiveIcon,
-  ArrowLeftIcon,
   CheckIcon,
   LockIcon,
   LockOpenIcon,
+  MoreHorizontalIcon,
   NotebookPenIcon,
   PencilIcon,
   PlusIcon,
   SearchIcon,
   Trash2Icon,
 } from "lucide-react";
-import { cloneElement, isValidElement, useId, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   archiveMemory,
@@ -28,7 +27,7 @@ import {
   unlockMemory,
   updateMemory,
 } from "@/api";
-import { FlareMoLogo } from "@/components/flaremo-logo";
+import { SubpageHeader } from "@/components/subpage-header";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -50,16 +49,25 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Empty,
   EmptyDescription,
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/i18n";
+import { errorMessage } from "@/lib/error";
+import { stripResourceName } from "@/lib/utils";
 
 type MemoryTab = "core" | "projects" | "recent" | "review" | "archive";
 
@@ -114,23 +122,7 @@ export function MemoryPage() {
   return (
     <div className="min-h-svh bg-background px-4 py-5 sm:py-8">
       <main className="mx-auto flex w-full max-w-[720px] flex-col gap-4">
-        <header className="flex items-center justify-between gap-3">
-          <Button asChild size="sm" variant="ghost">
-            <Link
-              search={{
-                q: undefined,
-                tag: undefined,
-                view: undefined,
-                untagged: undefined,
-              }}
-              to="/"
-            >
-              <ArrowLeftIcon data-icon="inline-start" />
-              {t("common.back")}
-            </Link>
-          </Button>
-          <FlareMoLogo markClassName="size-5" />
-        </header>
+        <SubpageHeader />
 
         <div className="flex items-end justify-between gap-3 px-1">
           <h1 className="font-heading text-xl font-semibold">
@@ -164,9 +156,11 @@ export function MemoryPage() {
             <TabsTrigger value="recent">{t("memory.tab.recent")}</TabsTrigger>
             <TabsTrigger value="review">
               {t("memory.tab.review")}
-              {reviewQuery.data && reviewQuery.data.memories.length > 0
-                ? ` (${reviewQuery.data.memories.length})`
-                : ""}
+              {reviewQuery.data && reviewQuery.data.memories.length > 0 && (
+                <span className="ml-1 text-xs text-muted-foreground tabular-nums">
+                  {reviewQuery.data.memories.length}
+                </span>
+              )}
             </TabsTrigger>
             <TabsTrigger value="archive">{t("memory.tab.archive")}</TabsTrigger>
           </TabsList>
@@ -190,15 +184,35 @@ export function MemoryPage() {
             />
           </TabsContent>
           <TabsContent value="review" className="mt-3">
-            <MemoryList
-              memories={reviewQuery.data?.memories ?? []}
-              loading={reviewQuery.isLoading}
-              onMutated={invalidate}
-              review
-            />
+            {reviewQuery.isError ? (
+              <Empty className="min-h-56 border">
+                <EmptyHeader>
+                  <EmptyTitle>{t("list.errorTitle")}</EmptyTitle>
+                  <EmptyDescription>
+                    {t("list.errorDescription")}
+                  </EmptyDescription>
+                </EmptyHeader>
+                <Button
+                  className="mt-2"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void reviewQuery.refetch()}
+                >
+                  {t("common.retry")}
+                </Button>
+              </Empty>
+            ) : (
+              <MemoryList
+                memories={reviewQuery.data?.memories ?? []}
+                loading={reviewQuery.isLoading}
+                onMutated={invalidate}
+                review
+              />
+            )}
           </TabsContent>
           <TabsContent value="archive" className="mt-3">
             <MemoryList
+              emptyTitle={t("memory.archiveEmpty")}
               memories={groups.archive}
               loading={listQuery.isLoading}
               onMutated={invalidate}
@@ -206,10 +220,10 @@ export function MemoryPage() {
           </TabsContent>
         </Tabs>
 
-        <MemoryCreateDialog
+        <MemoryFormDialog
           open={creating}
           onOpenChange={setCreating}
-          onCreated={invalidate}
+          onSaved={invalidate}
         />
       </main>
     </div>
@@ -220,12 +234,14 @@ function MemoryList({
   memories,
   loading,
   onMutated,
+  emptyTitle,
   showSource = false,
   review = false,
 }: {
   memories: Memory[];
   loading: boolean;
   onMutated: () => void;
+  emptyTitle?: string;
   showSource?: boolean;
   review?: boolean;
 }) {
@@ -245,9 +261,12 @@ function MemoryList({
       <Empty className="min-h-56 border">
         <EmptyHeader>
           <EmptyTitle>
-            {review ? t("memory.reviewEmpty") : t("memory.emptyTitle")}
+            {emptyTitle ??
+              (review ? t("memory.reviewEmpty") : t("memory.emptyTitle"))}
           </EmptyTitle>
-          <EmptyDescription>{t("memory.emptyDescription")}</EmptyDescription>
+          {!review && !emptyTitle && (
+            <EmptyDescription>{t("memory.emptyDescription")}</EmptyDescription>
+          )}
         </EmptyHeader>
       </Empty>
     );
@@ -285,54 +304,67 @@ function MemoryCard({
   const [showRevisions, setShowRevisions] = useState(false);
 
   const confirmMutation = useMutation({
-    mutationFn: () => confirmMemory(bareId(memory.id)),
+    mutationFn: () => confirmMemory(stripResourceName(memory.id, "memories")),
     onSuccess: () => {
       toast.success(t("toast.memoryConfirmed"));
       onMutated();
     },
+    onError: (error) =>
+      toast.error(errorMessage(error, t("toast.memoryConfirmFailed"))),
   });
 
   const lockMutation = useMutation({
-    mutationFn: () => lockMemory(bareId(memory.id)),
+    mutationFn: () => lockMemory(stripResourceName(memory.id, "memories")),
     onSuccess: () => {
       toast.success(t("toast.memoryLocked"));
       onMutated();
     },
+    onError: (error) =>
+      toast.error(errorMessage(error, t("toast.memoryLockFailed"))),
   });
 
   const unlockMutation = useMutation({
-    mutationFn: () => unlockMemory(bareId(memory.id)),
+    mutationFn: () => unlockMemory(stripResourceName(memory.id, "memories")),
     onSuccess: () => {
       toast.success(t("toast.memoryUnlocked"));
       onMutated();
     },
+    onError: (error) =>
+      toast.error(errorMessage(error, t("toast.memoryUnlockFailed"))),
   });
 
   const archiveMutation = useMutation({
-    mutationFn: () => archiveMemory(bareId(memory.id)),
+    mutationFn: () => archiveMemory(stripResourceName(memory.id, "memories")),
     onSuccess: () => {
       toast.success(t("toast.memoryArchived"));
       onMutated();
     },
+    onError: (error) =>
+      toast.error(errorMessage(error, t("toast.memoryArchiveFailed"))),
   });
 
   const promoteMutation = useMutation({
-    mutationFn: () => promoteMemoryToMemo(bareId(memory.id)),
+    mutationFn: () =>
+      promoteMemoryToMemo(stripResourceName(memory.id, "memories")),
     onSuccess: () => {
       toast.success(t("toast.saved"));
       onMutated();
     },
+    onError: (error) =>
+      toast.error(errorMessage(error, t("toast.memoryPromoteFailed"))),
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteMemory(bareId(memory.id)),
+    mutationFn: () => deleteMemory(stripResourceName(memory.id, "memories")),
     onSuccess: () => {
       toast.success(t("toast.memoryDeleted"));
       onMutated();
     },
+    onError: (error) =>
+      toast.error(errorMessage(error, t("toast.memoryDeleteFailed"))),
   });
 
-  const id = bareId(memory.id);
+  const id = stripResourceName(memory.id, "memories");
 
   return (
     <Card>
@@ -402,55 +434,77 @@ function MemoryCard({
               {t("memory.archive")}
             </Button>
           )}
-          <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
-            <PencilIcon data-icon="inline-start" />
-            {t("memory.edit")}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setShowRevisions((value) => !value)}
-          >
-            {t("memory.revisions")}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => promoteMutation.mutate()}
-          >
-            <NotebookPenIcon data-icon="inline-start" />
-            {t("memory.toMemo")}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => setConfirmDelete(true)}
-          >
-            <Trash2Icon data-icon="inline-start" />
-            {t("memory.delete")}
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                aria-label={t("common.actions")}
+                className="ml-auto"
+                size="icon-sm"
+                variant="ghost"
+              >
+                <MoreHorizontalIcon />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onClick={() => setEditing(true)}>
+                <PencilIcon />
+                {t("common.edit")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => setShowRevisions((value) => !value)}
+              >
+                {t("memory.revisions")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => promoteMutation.mutate()}>
+                <NotebookPenIcon />
+                {t("memory.toMemo")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => setConfirmDelete(true)}
+              >
+                <Trash2Icon />
+                {t("common.delete")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         {showRevisions && <MemoryRevisions memoryId={id} />}
 
         <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-          <AlertDialogContent>
+          <AlertDialogContent size="sm">
             <AlertDialogHeader>
               <AlertDialogTitle>{t("memory.deleteConfirm")}</AlertDialogTitle>
               <AlertDialogDescription>
-                {t("memory.content")}: {memory.content.slice(0, 80)}
+                {memory.content.slice(0, 80)}
+                {memory.content.length > 80 ? "…" : ""}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel>
-              <AlertDialogAction onClick={() => deleteMutation.mutate()}>
-                {t("memory.delete")}
+              <AlertDialogCancel variant="ghost">
+                {t("common.cancel")}
+              </AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => deleteMutation.mutate()}
+              >
+                {t("common.delete")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
 
-        <MemoryEditDialog
+        <MemoryFormDialog
+          key={[
+            memory.id,
+            memory.content,
+            memory.type,
+            memory.kind,
+            memory.scope_type,
+            memory.scope_key ?? "",
+            memory.importance,
+          ].join("|")}
           memory={memory}
           open={editing}
           onOpenChange={setEditing}
@@ -470,6 +524,24 @@ function MemoryRevisions({ memoryId }: { memoryId: string }) {
 
   if (revisionsQuery.isLoading) {
     return <Skeleton className="h-16 w-full" />;
+  }
+  if (revisionsQuery.isError) {
+    return (
+      <Empty className="min-h-40 border">
+        <EmptyHeader>
+          <EmptyTitle>{t("list.errorTitle")}</EmptyTitle>
+          <EmptyDescription>{t("list.errorDescription")}</EmptyDescription>
+        </EmptyHeader>
+        <Button
+          className="mt-2"
+          size="sm"
+          variant="outline"
+          onClick={() => void revisionsQuery.refetch()}
+        >
+          {t("common.retry")}
+        </Button>
+      </Empty>
+    );
   }
   const revisions = revisionsQuery.data?.revisions ?? [];
   if (revisions.length === 0) {
@@ -525,8 +597,11 @@ function ProjectGroups({
     <div className="flex flex-col gap-5">
       {byProject.map(([project, items]) => (
         <section className="flex flex-col gap-2" key={project}>
-          <h2 className="px-1 text-sm font-medium text-muted-foreground">
-            {project} <span className="opacity-60">({items.length})</span>
+          <h2 className="flex items-baseline gap-1.5 px-1 text-sm font-medium text-muted-foreground">
+            <span className="truncate">{project}</span>
+            <span className="text-xs tabular-nums opacity-60">
+              {items.length}
+            </span>
           </h2>
           <MemoryList
             memories={items}
@@ -540,193 +615,63 @@ function ProjectGroups({
   );
 }
 
-function MemoryCreateDialog({
-  open,
-  onOpenChange,
-  onCreated,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
-}) {
-  const { t } = useI18n();
-  const [content, setContent] = useState("");
-  const [type, setType] = useState<Memory["type"]>("semantic");
-  const [kind, setKind] = useState<Memory["kind"]>("fact");
-  const [scopeType, setScopeType] = useState<Memory["scope_type"]>("global");
-  const [scopeKey, setScopeKey] = useState("");
-  const [importance, setImportance] = useState(50);
-  const [lock, setLock] = useState(false);
-
-  const createMutation = useMutation({
-    mutationFn: () =>
-      createMemory({
-        content,
-        type,
-        kind,
-        scope_type: scopeType,
-        scope_key: scopeKey.trim() || undefined,
-        tier: "normal",
-        importance,
-        lock,
-      }),
-    onSuccess: () => {
-      toast.success(t("common.save"));
-      setContent("");
-      setScopeKey("");
-      onOpenChange(false);
-      onCreated();
-    },
-    onError: (error) => {
-      toast.error(
-        error instanceof Error ? error.message : t("memory.createFailed"),
-      );
-    },
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>{t("memory.newMemory")}</DialogTitle>
-        </DialogHeader>
-        <div className="flex flex-col gap-4">
-          <Field label={t("memory.content")}>
-            <Textarea
-              rows={4}
-              value={content}
-              placeholder="XilerMo 使用 D1 作为事实源"
-              onChange={(event) => setContent(event.target.value)}
-            />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={t("memory.type")}>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={type}
-                onChange={(event) =>
-                  setType(event.target.value as Memory["type"])
-                }
-              >
-                <option value="semantic">{t("memory.type.semantic")}</option>
-                <option value="episodic">{t("memory.type.episodic")}</option>
-                <option value="procedural">
-                  {t("memory.type.procedural")}
-                </option>
-              </select>
-            </Field>
-            <Field label={t("memory.kind")}>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={kind}
-                onChange={(event) =>
-                  setKind(event.target.value as Memory["kind"])
-                }
-              >
-                {KINDS.map((value) => (
-                  <option key={value} value={value}>
-                    {t(`memory.kind.${value}`)}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label={t("memory.scope")}>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                value={scopeType}
-                onChange={(event) =>
-                  setScopeType(event.target.value as Memory["scope_type"])
-                }
-              >
-                <option value="global">{t("memory.scope.global")}</option>
-                <option value="workspace">{t("memory.scope.workspace")}</option>
-                <option value="project">{t("memory.scope.project")}</option>
-                <option value="agent">{t("memory.scope.agent")}</option>
-              </select>
-            </Field>
-            <Field label={t("memory.importance")}>
-              <input
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
-                max={100}
-                min={0}
-                type="number"
-                value={importance}
-                onChange={(event) =>
-                  setImportance(Number.parseInt(event.target.value, 10) || 0)
-                }
-              />
-            </Field>
-          </div>
-          {scopeType !== "global" && (
-            <Field label={t("memory.scopeKey")}>
-              <Input
-                value={scopeKey}
-                placeholder="github:owner/repo"
-                onChange={(event) => setScopeKey(event.target.value)}
-              />
-            </Field>
-          )}
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              checked={lock}
-              type="checkbox"
-              onChange={(event) => setLock(event.target.checked)}
-            />
-            {t("memory.lock")}
-          </label>
-        </div>
-        <DialogFooter>
-          <Button
-            disabled={!content.trim() || createMutation.isPending}
-            onClick={() => createMutation.mutate()}
-          >
-            {t("memory.save")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function MemoryEditDialog({
+function MemoryFormDialog({
   memory,
   open,
   onOpenChange,
   onSaved,
 }: {
-  memory: Memory;
+  memory?: Memory;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSaved: () => void;
 }) {
   const { t } = useI18n();
-  const [content, setContent] = useState(memory.content);
-  const [type, setType] = useState<Memory["type"]>(memory.type);
-  const [kind, setKind] = useState<Memory["kind"]>(memory.kind);
+  const [content, setContent] = useState(memory?.content ?? "");
+  const [type, setType] = useState<Memory["type"]>(memory?.type ?? "semantic");
+  const [kind, setKind] = useState<Memory["kind"]>(memory?.kind ?? "fact");
   const [scopeType, setScopeType] = useState<Memory["scope_type"]>(
-    memory.scope_type,
+    memory?.scope_type ?? "global",
   );
-  const [scopeKey, setScopeKey] = useState(memory.scope_key ?? "");
-  const [importance, setImportance] = useState(memory.importance);
+  const [scopeKey, setScopeKey] = useState(memory?.scope_key ?? "");
+  const [importance, setImportance] = useState(memory?.importance ?? 50);
+  const [lock, setLock] = useState(false);
 
-  const updateMutation = useMutation({
+  const saveMutation = useMutation({
     mutationFn: () =>
-      updateMemory(bareId(memory.id), {
-        content,
-        type,
-        kind,
-        scope_type: scopeType,
-        scope_key: scopeKey.trim() || undefined,
-        importance,
-      }),
+      memory
+        ? updateMemory(stripResourceName(memory.id, "memories"), {
+            content,
+            type,
+            kind,
+            scope_type: scopeType,
+            scope_key: scopeKey.trim() || undefined,
+            importance,
+          })
+        : createMemory({
+            content,
+            type,
+            kind,
+            scope_type: scopeType,
+            scope_key: scopeKey.trim() || undefined,
+            tier: "normal",
+            importance,
+            lock,
+          }),
     onSuccess: () => {
       toast.success(t("common.save"));
+      if (!memory) {
+        setContent("");
+        setScopeKey("");
+      }
       onOpenChange(false);
       onSaved();
     },
     onError: (error) => {
       toast.error(
-        error instanceof Error ? error.message : t("memory.updateFailed"),
+        error instanceof Error
+          ? error.message
+          : t(memory ? "memory.updateFailed" : "memory.createFailed"),
       );
     },
   });
@@ -735,14 +680,16 @@ function MemoryEditDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{t("memory.edit")}</DialogTitle>
+          <DialogTitle>
+            {memory ? t("memory.editMemory") : t("memory.newMemory")}
+          </DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-4">
           <Field label={t("memory.content")}>
             <Textarea
               rows={4}
               value={content}
-              placeholder="XilerMo 使用 D1 作为事实源"
+              placeholder={t("memory.contentPlaceholder")}
               onChange={(event) => setContent(event.target.value)}
             />
           </Field>
@@ -813,39 +760,27 @@ function MemoryEditDialog({
               />
             </Field>
           )}
+          {!memory && (
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                checked={lock}
+                type="checkbox"
+                onChange={(event) => setLock(event.target.checked)}
+              />
+              {t("memory.lock")}
+            </label>
+          )}
         </div>
         <DialogFooter>
           <Button
-            disabled={!content.trim() || updateMutation.isPending}
-            onClick={() => updateMutation.mutate()}
+            disabled={!content.trim() || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
           >
-            {t("memory.save")}
+            {t("common.save")}
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  );
-}
-
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  const id = useId();
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-sm font-medium" htmlFor={id}>
-        {label}
-      </label>
-      {isValidElement(children)
-        ? cloneElement(children as React.ReactElement<{ id?: string }>, {
-            id,
-          })
-        : children}
-    </div>
   );
 }
 
@@ -860,10 +795,6 @@ const KINDS: Memory["kind"][] = [
   "lesson",
   "procedure",
 ];
-
-function bareId(id: string) {
-  return id.replace(/^memories\//, "");
-}
 
 function formatTimestamp(value: string) {
   return new Date(value).toLocaleString();

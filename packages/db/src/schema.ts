@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   index,
   integer,
@@ -14,13 +15,19 @@ export const users = sqliteTable(
     email: text("email").notNull(),
     name: text("name").notNull(),
     avatarUrl: text("avatar_url"),
-    role: text("role", { enum: ["owner", "member"] })
+    role: text("role", { enum: ["owner", "admin", "member"] })
       .notNull()
       .default("owner"),
+    status: text("status", { enum: ["active", "removed"] })
+      .notNull()
+      .default("active"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
-  (table) => [uniqueIndex("users_email_idx").on(table.email)],
+  (table) => [
+    uniqueIndex("users_email_idx").on(table.email),
+    index("users_role_status_idx").on(table.role, table.status),
+  ],
 );
 
 // Better Auth owns authentication identities. These tables intentionally stay
@@ -232,6 +239,11 @@ export const memos = sqliteTable(
       table.userId,
       table.status,
       table.pinned,
+      table.createdAt,
+      table.id,
+    ),
+    index("memos_user_created_id_idx").on(
+      table.userId,
       table.createdAt,
       table.id,
     ),
@@ -587,6 +599,13 @@ export const attachments = sqliteTable(
       table.state,
       table.createdAt,
     ),
+    // The cleanup cron scans globally on this predicate (state='deleting' or
+    // orphaned imports); keep the sweep off a full table scan.
+    index("attachments_cleanup_idx")
+      .on(table.createdAt)
+      .where(
+        sql`(deleted_at is null and (state = 'deleting' or memo_id is null))`,
+      ),
   ],
 );
 
@@ -669,6 +688,32 @@ export const dataTasks = sqliteTable(
   ],
 );
 
+/** Durable administrator-owned member removal workflow records. */
+export const memberRemovalJobs = sqliteTable(
+  "member_removal_jobs",
+  {
+    id: text("id").primaryKey(),
+    memberId: text("member_id").notNull(),
+    requestedBy: text("requested_by").notNull(),
+    status: text("status", {
+      enum: ["queued", "removing", "failed", "completed"],
+    })
+      .notNull()
+      .default("queued"),
+    phase: text("phase").notNull().default("created"),
+    attempts: integer("attempts").notNull().default(0),
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("member_removal_jobs_member_idx").on(table.memberId, table.createdAt),
+    index("member_removal_jobs_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
 // Agent Memory keeps AI-contributed long-term knowledge separate from the
 // user's memo timeline. Each memory is an atomic conclusion (see
 // docs/product-requirements.md and the Agent Memory design); long-form content
@@ -741,8 +786,8 @@ export const memoryItems = sqliteTable(
     fingerprint: text("fingerprint").notNull(),
     accessCount: integer("access_count").notNull().default(0),
     lastAccessedAt: text("last_accessed_at"),
-    // Reserved for the optional P1 embedding layer. P0 keeps these at
-    // `not_indexed` and never touches a vector binding.
+    // Memory embeddings index into the memories vector index under the
+    // owner's namespace; `not_indexed` is the pre-embedding state.
     embeddingStatus: text("embedding_status", {
       enum: ["not_indexed", "pending", "indexed", "error"],
     })
@@ -1077,6 +1122,8 @@ export type AttachmentRow = typeof attachments.$inferSelect;
 export type ShareRow = typeof shares.$inferSelect;
 export type DataTaskRow = typeof dataTasks.$inferSelect;
 export type NewDataTaskRow = typeof dataTasks.$inferInsert;
+export type MemberRemovalJobRow = typeof memberRemovalJobs.$inferSelect;
+export type NewMemberRemovalJobRow = typeof memberRemovalJobs.$inferInsert;
 export type MemoryItemRow = typeof memoryItems.$inferSelect;
 export type NewMemoryItemRow = typeof memoryItems.$inferInsert;
 export type MemoryRevisionRow = typeof memoryRevisions.$inferSelect;

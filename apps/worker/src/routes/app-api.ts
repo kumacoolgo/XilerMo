@@ -15,20 +15,21 @@ import {
   walkNextQuerySchema,
 } from "@flaremo/contracts";
 import type { FlareMoDb, MemoRow, UserRow } from "@flaremo/db";
-import { memos as memosTable } from "@flaremo/db";
 import {
   assertMonthlyQuota,
+  canEditMemo,
   createMemo,
   createMemoryFromMemo,
   createMemoryFromMemoInputToWrite,
   deleteTag,
   estimateTokenCount,
   getAuthUserById,
+  getFlaremoUserNames,
   getMemoById,
   getMemoStats,
   getRandomMemo,
+  getSemanticSearchMemos,
   getWalkNextMemo,
-  hardDeleteMemo,
   incrementUsageCounter,
   listAttachmentsForMemos,
   listDailyReviewMemos,
@@ -36,13 +37,11 @@ import {
   listRelatedMemos,
   listTagHierarchy,
   listUserNotifications,
-  markMemoAttachmentsDeleting,
   moveMemoToTrash,
   NotFoundError,
   renameTag,
   reportPlanUsage,
   reportVectorUsage,
-  SELF_HOST_UNLIMITED,
   semanticSearchMemos,
   type UserNotificationDto,
   updateMemo,
@@ -54,7 +53,6 @@ import {
   parseMemosResourceName,
 } from "@flaremo/memos";
 import { zValidator } from "@hono/zod-validator";
-import { inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import { getRequestContext, type HonoBindings } from "../context";
 import {
@@ -64,6 +62,7 @@ import {
 } from "../embedding";
 import { jsonError } from "../http";
 import { buildMemoContext } from "../memo-context";
+import { hardDeleteMemoWithAttachments } from "../memo-hard-delete";
 
 export const appApi = new Hono<HonoBindings>();
 
@@ -79,6 +78,7 @@ appApi.get("/me", async (c) => {
     return c.json({
       id: user.id,
       role: user.role,
+      status: user.status,
       name: user.name,
       email: authUser?.email ?? user.email,
       username: authUser?.username ?? user.id.replace(/^users\//, ""),
@@ -114,6 +114,10 @@ appApi.get("/memos", zValidator("query", listMemosQuerySchema), async (c) => {
   try {
     const { db, user } = await getRequestContext(c);
     const result = await listMemos(db, user, c.req.valid("query"));
+    const creatorNames = await getFlaremoUserNames(
+      db,
+      result.memos.map((memo) => memo.userId),
+    );
     const attachments = await listAttachmentsForMemos(
       db,
       user,
@@ -126,7 +130,14 @@ appApi.get("/memos", zValidator("query", listMemosQuerySchema), async (c) => {
       current.push(attachment);
       attachmentsByMemo.set(attachment.memoId, current);
     }
-    return c.json(memosToListResponse({ ...result, attachmentsByMemo, user }));
+    return c.json(
+      memosToListResponse({
+        ...result,
+        attachmentsByMemo,
+        creatorNames,
+        user,
+      }),
+    );
   } catch (error) {
     return jsonError(c, error);
   }
@@ -186,21 +197,22 @@ appApi.get(
           ).catch(() => undefined),
         ]),
       );
-      const rows = await db
-        .select()
-        .from(memosTable)
-        .where(
-          inArray(
-            memosTable.id,
-            hits.map((hit) => hit.id),
-          ),
-        );
-      const byId = new Map(rows.map((row) => [row.id, row]));
-      const ordered = hits
-        .map((hit) => byId.get(hit.id))
-        .filter((row): row is MemoRow => row !== undefined);
+      const ordered = await getSemanticSearchMemos(
+        db,
+        user,
+        hits.map((hit) => hit.id),
+      );
+      const creatorNames = await getFlaremoUserNames(
+        db,
+        ordered.map((memo) => memo.userId),
+      );
       return c.json({
-        memos: ordered.map((memo) => memoToDto(memo, user)),
+        memos: ordered.map((memo) => ({
+          ...memoToDto(memo, user, creatorNames.get(memo.userId)),
+          // Same server-derived rule as list responses (canEditMemo), so
+          // semantic results keep their manage affordances.
+          can_manage: canEditMemo(user, memo),
+        })),
         degraded: false,
       });
     } catch (error) {
@@ -412,14 +424,7 @@ appApi.delete("/memos/:id", async (c) => {
     const { db, user } = await getRequestContext(c);
     const id = `memos/${c.req.param("id")}`;
     if (c.req.query("hard") === "true") {
-      const attachments = await markMemoAttachmentsDeleting(db, user, id);
-      const objectKeys = attachments
-        .filter((attachment) => attachment.state !== "missing")
-        .map((attachment) => attachment.r2Key);
-      if (objectKeys.length > 0) {
-        await c.env.ATTACHMENTS.delete(objectKeys);
-      }
-      await hardDeleteMemo(db, user, id);
+      await hardDeleteMemoWithAttachments(c.env, db, user, id);
       return c.json({ ok: true });
     }
     const memo = await moveMemoToTrash(db, user, id);

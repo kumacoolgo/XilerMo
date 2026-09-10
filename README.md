@@ -1,6 +1,8 @@
 # XilerMo
 
-**一个免费账号就能 24 小时跑在云端的个人笔记系统。Cloudflare 原生部署，自带数据库和对象存储，应用层使用 Better Auth 原生登录，对外保留 Memos 兼容 API；Cloudflare Access 可以作为可选外层防线。**
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
+
+**一个免费账号就能 24 小时跑在云端的团队知识库。一个人用，是安静的私人笔记；一个团队用，是带角色权限的共享知识库。Cloudflare 原生部署，自带数据库和对象存储，私密 / 团队 / 公开三档可见性，应用层使用 Better Auth 原生登录，对外保留 Memos 兼容 API；Cloudflare Access 可以作为可选外层防线。**
 
 [![GitHub stars](https://img.shields.io/github/stars/realchendahuang/FlareMo?style=social)](https://github.com/realchendahuang/FlareMo)
 [![license](https://img.shields.io/github/license/realchendahuang/FlareMo)](./LICENSE)
@@ -9,14 +11,12 @@
 
 [English](./README.en.md)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kumacoolgo/XilerMo)
-
 <p>
   <img src="./docs/assets/flaremo-desktop.png" alt="FlareMo desktop timeline" width="720">
   <img src="./docs/assets/flaremo-mobile.png" alt="FlareMo mobile timeline" width="220">
 </p>
 
-截图展示的是当前已接上后端的时间线、编辑、筛选和移动端导航体验；未实现的 AI 回顾、语义搜索、微信输入等能力不会出现在界面里。
+截图展示的是当前已接上后端的时间线、编辑、筛选和移动端导航体验；未实现的能力（如微信输入）不会以占位入口的形式出现在界面里。
 
 ---
 
@@ -24,7 +24,7 @@
 
 Flomo 证明了「快速记录 + 安静时间线」这种轻量笔记体验是有价值的。但自部署这类系统通常意味着一台 VPS、一个 Postgres、一堆 Docker 容器、一份每周要维护的备份脚本，以及硬盘哪天坏了数据全没的风险。
 
-FlareMo 想回答另一个问题：**能不能只用一个免费 Cloudflare 账号，不买服务器、不装数据库、不写备份脚本，就拥有一个 24 小时在线、数据不会丢、可以自定义域名、还能被各种工具调用的个人笔记系统？**
+FlareMo 想回答另一个问题：**能不能只用一个免费 Cloudflare 账号，不买服务器、不装数据库、不写备份脚本，就拥有一个 24 小时在线、数据不会丢、可以自定义域名、还能被各种工具调用的知识库——一个人用是私人笔记，一个团队用是共享知识库？**
 
 答案是可以。Cloudflare 免费账号就能提供：
 
@@ -35,6 +35,8 @@ FlareMo 想回答另一个问题：**能不能只用一个免费 Cloudflare 账�
 - **Workers Static Assets** —— 前端和 API 由同一个 Worker 提供，一次部署全搞定。
 
 整套系统跑在一个 Worker 上。你没有一个「服务器」要照看，只有一份代码和一个免费账号。
+
+团队协作也不需要为此升级到付费 SaaS 或多养一台服务器：同一份部署里，管理员在「团队管理」界面添加成员，笔记按「私密 / 团队可见 / 全网公开」三档可见性共享；成员被移出时，其私密数据被完整清理，团队与公开内容保留。所有数据——包括团队成员的数据——都只存在你自己的 Cloudflare 账号里。
 
 ---
 
@@ -81,10 +83,14 @@ FlareMo 想回答另一个问题：**能不能只用一个免费 Cloudflare 账�
 - 快速记录笔记，支持标签和附件。
 - 时间线、归档、回收站。
 - D1 FTS5 全文搜索、标签筛选、活动热力图；默认搜索时间线与归档，搜索支持 `has:attachment`、`is:pinned`、`before:YYYY-MM-DD`、`after:YYYY-MM-DD` 和 `in:timeline|archive|trash`。
+- 语义搜索（「找一找」）：Workers AI embedding + Vectorize 派生索引，命中后回 D1 复查权限；provider 或索引缺失时自动降级回 FTS5 关键词搜索，边界见 [docs/semantic-search.md](./docs/semantic-search.md)。
+- 每日回顾（`/review/daily` 那年今日）、随机漫步（`/review/walk` 标签/引用游走 + 明信片总结）和 memo 详情页的相关笔记。
 - 可安装的 PWA；新建笔记草稿自动保存在本机，离线提交（包括附件）进入本机待同步队列，重新联网后按顺序提交。
 - Markdown/GFM、图片与音频附件预览。
 - 记录详情、引用关系、反向链接和历史版本恢复。
 - 可撤销的公开分享链接。
+- 团队模式：`owner` / `admin` / `member` 角色与成员管理。管理员在「团队管理」界面添加成员（姓名 + 邮箱，服务端签发一次性激活链接，成员自设密码，管理员不经手也不可知晓密码）、设置或取消管理员、移出成员并触发可重试的数据清理（私密内容删除，团队与公开内容保留）。
+- 三档可见性：私密（仅作者）、团队可见（有效成员只读）、全网公开（匿名只读）；Web、Memos 兼容 API、MCP、附件、搜索与 SSE 共用同一权限矩阵。
 - 支持冲突策略的 Memos 数据导入导出。
 - Memos current camelCase / protobuf-JSON 风格的 `/api/v1` memo、attachment、relation、share、social、auth facade 和 PAT 资源子集；Connect JSON/protobuf/gRPC-Web 还覆盖多用户 UserService 的 webhook CRUD/signing-secret 与 notification list/update/delete（含 comment/mention payload）；旧 snake_case wire 通过显式 header 保留。
 - OpenAPI 输出。
@@ -92,36 +98,30 @@ FlareMo 想回答另一个问题：**能不能只用一个免费 Cloudflare 账�
 - Agent Memory：AI 长期记忆中枢，Agent 通过 `/memory/mcp` 读写跨 session 的长期记忆（偏好、决策、约束、教训），`/memory` 界面可查看、确认、锁定、纠正。
 - 中英文界面。
 
-前端只保留当前已经接上能力的入口。AI 回顾、语义搜索、随机漫步、微信输入这类功能还没实现，就不会挂在界面里占位置。
+前端只保留当前已经接上能力的入口。像微信输入这类还没实现的能力，不会挂在界面里占位置。
 
 ---
 
-## 部署：一键或让 Agent 替你做
+## 部署：手动或让 Agent 替你做
 
-FlareMo 的部署被刻意做得很轻。两种方式，挑一种就行。
+XilerMo 保留了可直接使用的 `wrangler.jsonc` 和上方的一键部署按钮；也可以按下面的 Agent 或手动流程部署。
 
-**方式一：一键部署按钮**
+**方式一：让 AI Agent 替你部署**
 
-点击上方「Deploy to Cloudflare」按钮，Cloudflare 会读取 `wrangler.jsonc`，自动创建 Worker、生成 D1 / R2 绑定并通过部署命令应用 D1 migrations。把 `FLAREMO_DEPLOY_REPOSITORY` 填成 Cloudflare 创建的 GitHub 仓库（例如 `octocat/flaremo`），应用内就能直接打开该仓库的更新 workflow。
-
-如果你的 Cloudflare Dashboard 还没有连接 GitHub 或 GitLab，Cloudflare 会先要求连接 Git provider。这个 OAuth 授权由你在 Cloudflare 页面里确认，和 FlareMo 的 Better Auth 登录是两件事；FlareMo 不会要求把任何真实凭据写进仓库。
-
-**方式二：让 AI Agent 替你部署**
-
-仓库里带了一份 [docs/agent-deploy.md](./docs/agent-deploy.md)，是写给 Codex / Claude Code / Cursor 这类 Agent 用的部署 runbook。把仓库交给一个能跑命令的 Agent，它就能按 runbook 创建 D1 / R2 资源、填写 `database_id`、跑迁移、部署。你不用记命令，Agent 自己按步骤来。
+仓库里带了一份 [docs/agent-deploy.md](./docs/agent-deploy.md)，是写给 Codex / Claude Code / Cursor 这类 Agent 用的部署 runbook。把仓库交给一个能跑命令的 Agent，它就能复制 `wrangler.jsonc.example`、创建 D1 / R2 资源、填写 `database_id`、跑迁移、部署。你不用记命令，Agent 自己按步骤来。
 
 需要让 Agent、Telegram 或其他 IM 渠道直接写入笔记时，参考 [Agent 与 IM 渠道写入](./docs/agent-ingestion.md)。仓库提供一个经过测试的独立 Telegram Worker 示例，不会把渠道密钥或平台逻辑塞进 FlareMo 主 Worker。
 
 需要让 Agent 读写跨 session 的长期记忆（用户偏好、项目决策、约束、教训）时，参考 [Agent Memory](./docs/agent-memory.md)：统一 `/memory/mcp` 端点 + 六个工具，记忆归用户所有、可随时查看和纠正。
 
-**手动部署**（想自己一步步来的话）先创建资源：
+**方式二：手动部署**（想自己一步步来的话）先创建资源：
 
 ```bash
 pnpm exec wrangler d1 create flaremo
 pnpm exec wrangler r2 bucket create flaremo-attachments
 ```
 
-把 D1 输出的 `database_id` 写入 `wrangler.jsonc`，再执行：
+检查仓库中的 `wrangler.jsonc`，填入 D1 输出的 `database_id`，并把 `FLAREMO_PUBLIC_URL` 设为你的公开访问域名，再执行：
 
 ```bash
 pnpm verify
@@ -129,7 +129,7 @@ pnpm deploy:dry-run
 pnpm deploy
 ```
 
-完整部署说明见 [docs/deploy.md](./docs/deploy.md)，版本更新见 [docs/update.md](./docs/update.md)。Deploy Button 的实测记录见 [docs/deploy-button-test.md](./docs/deploy-button-test.md)。
+完整部署说明见 [docs/deploy.md](./docs/deploy.md)，版本更新见 [docs/update.md](./docs/update.md)。
 
 **部署前检查清单**
 
@@ -146,7 +146,7 @@ pnpm deploy
 
 ## 登录：Better Auth 原生认证，Access 可选
 
-FlareMo 的应用层认证由 Better Auth 提供。第一次部署时由部署者在生产 HTTPS 的 `/setup` 页面手动输入一次性 bootstrap secret、显示名、邮箱和密码，创建唯一初始 owner；成功后公共 signup 默认关闭，owner 可在后台开启开放注册。开启后，任何人都能通过 `/register` 页或 Memos 兼容客户端的 `signup` 创建普通成员账户。`FLAREMO_SINGLE_USER_EMAIL` 和 `FLAREMO_SINGLE_USER_NAME` 只是既有 `users/owner` domain metadata 的 legacy 变量，不是登录凭据或 bootstrap 输入。
+FlareMo 的应用层认证由 Better Auth 提供。第一次部署时由部署者在生产 HTTPS 的 `/setup` 页面手动输入一次性 bootstrap secret、显示名、邮箱和密码，创建唯一初始 owner；成功后公共 signup 默认关闭。团队协作的主路径是管理员在「团队管理」界面添加成员：服务端签发一次性激活链接，成员自行设置密码；`owner` 也可以在后台开启开放注册（兼容路径，默认关闭），开启后任何人都能通过 `/register` 页或 Memos 兼容客户端的 `signup` 创建普通成员账户。`FLAREMO_SINGLE_USER_EMAIL` 和 `FLAREMO_SINGLE_USER_NAME` 只是既有 `users/owner` domain metadata 的 legacy 变量，不是登录凭据或 bootstrap 输入。团队角色、可见性权限和成员移除语义见 [docs/team-mode.md](./docs/team-mode.md)。
 
 - Web 端使用**邮箱 + 密码**登录（`/login`）；注册、管理员建号、初始化都以邮箱为登录凭证。Memos 兼容客户端仍使用**用户名 + 密码**登录——用户名由邮箱自动生成（可复制、可在账户页修改），协议上无法用邮箱登录。
 
@@ -307,8 +307,8 @@ FlareMo 当前已经具备：
 - Memos 兼容 API 子集、导入导出、OpenAPI 和 MCP。
 - Flomo 风格的快速记录和时间线 UI。
 - Better Auth 原生 cookie session、一次性 owner bootstrap 和可撤销 `memos_pat_` PAT。
+- 团队模式：owner/admin/member 角色、团队管理界面、三档可见性权限矩阵和可重试的成员移除清理。
 - Cloudflare Access 可选外层防线，以及公开分享 bypass 的边界说明。
-- Deploy to Cloudflare 按钮。
 - Agent 部署 runbook、发版规则、兼容矩阵和开源协作文件。
 
 后续方向见 [ROADMAP.md](./ROADMAP.md)。语义搜索的实现边界见 [docs/semantic-search.md](./docs/semantic-search.md)。
@@ -322,18 +322,19 @@ pnpm verify
 pnpm deploy:dry-run
 ```
 
-Deploy Button 创建的用户仓库包含一个最小权限的更新 workflow。它只同步正式 Release 并创建升级 PR；合并后仍由 Cloudflare Workers Builds 负责部署，不需要 Cloudflare API Token。
+自部署仓库自带一个最小权限的更新 workflow（`flaremo-update.yml`）。它只同步正式 Release 并创建升级 PR；合并后由该仓库连接的 Cloudflare Workers Builds 负责部署，不需要 Cloudflare API Token。配置方式见 [docs/update.md](./docs/update.md)。
 
 常用维护命令：
 
 ```bash
 pnpm format:check
+pnpm persistence:check
 pnpm screenshots
 pnpm backup:drill
 pnpm release vX.Y.Z
 ```
 
-`pnpm verify` 会跑类型检查、Vitest、生产构建和 Playwright E2E。Memos 兼容面有独立的 Worker contract test，覆盖 DTO shape、附件导入导出和 OpenAPI 路径。截图由 `pnpm screenshots` 从本地 Worker 实例生成，README 里的图片不是设计稿。
+`pnpm verify` 会先校验 D1 持久化清单完整性，再跑类型检查、Vitest、生产构建和 Playwright E2E。Memos 兼容面有独立的 Worker contract test，覆盖 DTO shape、附件导入导出和 OpenAPI 路径。截图由 `pnpm screenshots` 从本地 Worker 实例生成，README 里的图片不是设计稿。
 
 发版规则见 [docs/release.md](./docs/release.md)。维护手册见 [docs/maintenance.md](./docs/maintenance.md)。贡献说明见 [CONTRIBUTING.md](./CONTRIBUTING.md)。支持入口见 [SUPPORT.md](./SUPPORT.md)。安全策略见 [SECURITY.md](./SECURITY.md)。社区行为准则见 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md)。
 

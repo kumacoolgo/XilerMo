@@ -36,56 +36,6 @@ export function getStaticRoutes(): RouteMeta[] {
       jsonLd: SOFTWARE_APPLICATION_JSON_LD,
     },
     {
-      path: "/pricing",
-      locale: "zh-CN",
-      title: "定价",
-      description:
-        "FlareMo 定价：Free 永久免费，Pro 与 Team 由 Stripe 结算，Phase 2 上线。",
-      jsonLd: {
-        "@type": "Product",
-        name: "FlareMo",
-        description:
-          "FlareMo pricing: Free is forever, Pro and Team bill through Stripe (Phase 2).",
-        offers: [
-          { "@type": "Offer", name: "Free", price: "0", priceCurrency: "USD" },
-          { "@type": "Offer", name: "Pro", price: "4", priceCurrency: "USD" },
-          { "@type": "Offer", name: "Team", price: "9", priceCurrency: "USD" },
-        ],
-      },
-    },
-    {
-      path: "/en/pricing",
-      locale: "en-US",
-      title: "Pricing",
-      description:
-        "FlareMo pricing: Free is forever, Pro and Team bill through Stripe (Phase 2).",
-      jsonLd: {
-        "@type": "Product",
-        name: "FlareMo",
-        description:
-          "FlareMo pricing: Free is forever, Pro and Team bill through Stripe (Phase 2).",
-        offers: [
-          { "@type": "Offer", name: "Free", price: "0", priceCurrency: "USD" },
-          { "@type": "Offer", name: "Pro", price: "4", priceCurrency: "USD" },
-          { "@type": "Offer", name: "Team", price: "9", priceCurrency: "USD" },
-        ],
-      },
-    },
-    {
-      path: "/hosted",
-      locale: "zh-CN",
-      title: "Hosted 试用",
-      description:
-        "FlareMo Hosted SaaS 试用通知。Phase 2 计划于下一季度开放 hosted.flaremo.app 的邀请注册。",
-    },
-    {
-      path: "/en/hosted",
-      locale: "en-US",
-      title: "Hosted trial",
-      description:
-        "FlareMo Hosted SaaS trial notification. Phase 2 plans to open hosted.flaremo.app for invite registration next quarter.",
-    },
-    {
       path: "/docs",
       locale: "zh-CN",
       title: "文档总览",
@@ -109,7 +59,6 @@ export function getDocRoutes(): RouteMeta[] {
     "agent-ingestion",
     "agent-memory",
     "architecture-notes",
-    "deploy-button-test",
     "deploy",
     "design-system",
     "maintenance",
