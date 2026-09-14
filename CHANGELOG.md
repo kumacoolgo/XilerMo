@@ -2,6 +2,64 @@
 
 FlareMo 使用 SemVer。每个 release 都要写清楚升级影响、Cloudflare 资源变化和 Memos 兼容面变化。
 
+## v0.19.0
+
+体验优化版本：说明性小字全部改为悬停信息图标（InfoTip）；团队成员行操作收进图标菜单并新增搜索与分页；品牌外观移入独立标签页（不再嵌在团队管理内）；性能优化——修复窗口聚焦时全量重新拉取导致列表重放入场动画的卡顿（全局 staleTime 30s + 关闭 refetchOnWindowFocus，长列表不再逐卡播放动画）。无 API 变化、无数据变化。
+
+### 升级影响
+
+- 无 migration、无资源变化、无 API 变化，直接部署即可。
+
+## v0.18.0
+
+交互升级版本：设置类页面的操作表单全面弹窗化——添加成员、品牌外观编辑、修改密码、修改邮箱、删除账户、创建访问令牌、编辑用户名现在都以弹窗（Dialog/AlertDialog）打开；令牌吊销新增确认弹窗。状态展示类面板（传输、用量、令牌列表、品牌当前值）保持平铺。无 API 变化、无数据变化。
+
+### 升级影响
+
+- 无 migration、无资源变化、无 API 变化，直接部署即可。
+- 纯前端交互调整；e2e 覆盖更新并新增成员弹窗用例（29 用例）。
+
+## v0.17.1
+
+文案清理版本：删除界面中的装饰性小字——登录页侧栏的 eyebrow、描述段落与特性胶囊，Transfer 面板与品牌外观卡的说明性副标题。功能性文案（确认提示、警告、筛选帮助、空态引导）全部保留。无功能变化。
+
+### 升级影响
+
+- 无 migration、无资源变化、无 API 变化，直接部署即可。
+
+## v0.17.0
+
+设计系统版本：与 KOSX（impact.kosx.ai）设计语言完全对齐——纯 token 级变更，无功能变化。flame 主色相旋转至 KOSX signal 橙（#ff6a00）色系、中性色降饱和至纸墨色系（dark 主题锚定 KOSX paper #0a0a0a / surface #1c1c1e）、全局圆角 0.75rem→0.875rem、字体栈对齐 KOSX（Helvetica Neue / PingFang SC）、动效采用 KOSX 标志性缓动 cubic-bezier(0.22, 1, 0.36, 1)。
+
+### 升级影响
+
+- 无数据库 migration、无 Cloudflare 资源变化、无 API 兼容面变化，直接部署即可。
+- 自部署用户升级后界面颜色/圆角/字体会有轻微视觉变化（同一设计语言内的调优），功能与布局零变化。若你在本地覆写过 `index.css` token，需要手动合并。
+
+## v0.16.0
+
+新功能版本：管理员现在可以在后台「团队管理 → 品牌外观」配置实例的产品名称与 Logo（白标能力，面向企业定制与自部署品牌化）。配置存 D1，Logo 图片存 R2（`branding/` 前缀）；未配置时完全保持 FlareMo 默认外观。
+
+### 升级影响
+
+- 无数据库 migration（复用现有 `settings` 表）、无新 Cloudflare 资源（复用 `ATTACHMENTS` R2 bucket），直接部署即可。
+- 新增公开只读端点 `GET /api/app/branding`（匿名可访问，返回产品名与 Logo URL）与 `GET /api/app/branding/marks/:variant`（Logo 流式输出，带 ETag 与 300s 缓存）。
+- `GET /api/app/health` 的 `product` 字段现在返回配置后的产品名（未配置仍为 `FlareMo`）。
+- 管理员专用端点：`GET/PUT /api/app/admin/branding`、`PUT/DELETE /api/app/admin/branding/marks/:variant`（仅 owner；Logo 限 PNG/WebP/SVG，≤512KB）。
+
+## v0.15.4
+
+紧急修复版本：修复 v0.15.3 登录守卫回归——匿名或会话过期的访客在首页永远停留在「加载中…」，无法到达登录页（线上 KosX 实例因此自 0.15.3 部署起不可用）。**v0.15.3 自建用户请立即升级。**
+
+### 升级影响
+
+- 无数据库 migration、无 Cloudflare 资源变化、无 API 兼容面变化，直接部署即可；升级后用原有账号重新登录。
+
+### 修复
+
+- **登录守卫回归**：`AuthenticatedRoute` 此前把 `/` 排除在匿名跳转 `/login` 之外（0.15.3 修路由循环时引入），会话失效的访客在首页无限停留在加载屏。现在任何未登录访问（含首页）都会跳转登录页并保留 `redirect` 回跳；到达 `/login` 后重置一次性标记，登出后回到 `/` 也能再次正确弹跳。
+- 新增 e2e 用例覆盖「匿名访问 `/` 必须跳转登录」，防止回归。
+
 ## v0.15.3
 
 安全与正确性修复版本：修复语义搜索/记忆召回的 namespace 透传（此前带 namespace 的向量查询必然 0 命中）、封堵管理员经密码重置接管 owner 的路径、修复 Memos 兼容 force 删除的 R2 对象泄漏，并补齐部署护栏、限流默认值与一批文档/站点修正。含一处数据库 migration（附件清理部分索引，向前兼容）。

@@ -25,7 +25,7 @@ import { MIN_PASSWORD_LENGTH, SecurityPanel } from "./account/security-panel";
 import { TokensPanel } from "./account/tokens-panel";
 import { TransferPanel } from "./account/transfer-panel";
 import { UsagePanel } from "./account/usage-panel";
-import { AdminPanel } from "./admin-page";
+import { AdminPanel, BrandingCard } from "./admin-page";
 
 type AccountTab =
   | "profile"
@@ -303,12 +303,18 @@ export function AccountPage() {
             <TabsTrigger value="transfer">{t("auth.tab.transfer")}</TabsTrigger>
             <TabsTrigger value="usage">{t("auth.tab.usage")}</TabsTrigger>
             {isTeamAdmin && (
+              <TabsTrigger value="branding">
+                {t("auth.tab.branding")}
+              </TabsTrigger>
+            )}
+            {isTeamAdmin && (
               <TabsTrigger value="admin">{t("auth.tab.admin")}</TabsTrigger>
             )}
           </TabsList>
 
           <TabsContent value="profile" className="mt-4">
             <ProfilePanel
+              currentUsername={session.data?.user.username ?? ""}
               error={accountError}
               isPending={updateUsernameMutation.isPending}
               setUsername={setUsername}
@@ -322,6 +328,7 @@ export function AccountPage() {
             <SecurityPanel
               changeEmailIsPending={changeEmailMutation.isPending}
               changePasswordIsPending={changePasswordMutation.isPending}
+              currentEmail={session.data?.user.email ?? ""}
               currentPassword={currentPassword}
               deleteAccountIsPending={deleteAccountMutation.isPending}
               deleteError={deleteError}
@@ -384,6 +391,12 @@ export function AccountPage() {
               onRetryExport={() => retryExportMutation.mutate()}
             />
           </TabsContent>
+
+          {isTeamAdmin && (
+            <TabsContent value="branding" className="mt-4">
+              <BrandingCard />
+            </TabsContent>
+          )}
 
           {isTeamAdmin && (
             <TabsContent value="admin" className="mt-4">
