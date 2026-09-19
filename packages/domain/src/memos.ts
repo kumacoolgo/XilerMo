@@ -51,6 +51,29 @@ type MemoCursor = {
 const MAX_MEMO_CONTENT_LENGTH = 100_000;
 const MAX_MEMO_PAYLOAD_JSON_LENGTH = 100_000;
 
+/**
+ * Candidate-row ceiling for CEL filters that cannot be fully translated to
+ * SQL. Starred higher than attachment filters because memo scans may include
+ * an unbounded visibility window; deployments on quota-sensitive plans can
+ * lower it via FLAREMO_MEMO_FILTER_SCAN_LIMIT.
+ */
+export const DEFAULT_MEMO_FILTER_SCAN_LIMIT = 5_000;
+
+/**
+ * Parse FLAREMO_MEMO_FILTER_SCAN_LIMIT. Values below the page-sized floor,
+ * above the hard cap of 50000, or non-integers fall back to the default.
+ */
+export function parseMemoFilterScanLimit(
+  value: string | undefined,
+): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || String(parsed) !== value.trim()) {
+    return undefined;
+  }
+  return parsed;
+}
+
 function assertMemoContentSize(content: string) {
   if (content.length > MAX_MEMO_CONTENT_LENGTH) {
     throw new ValidationError(
@@ -80,6 +103,13 @@ export async function createMemo(
   }
   const tags = normalizeMemoTags(payload.tags ?? extractTags(input.content));
   payload.tags = tags;
+  // The task-list flags are domain truth, not client courtesy: recomputing
+  // keeps every write path (web, IM, agents) stamped even when the client
+  // sends no property at all.
+  payload.property = {
+    ...payload.property,
+    has_incomplete_tasks: hasUncheckedTaskList(input.content),
+  };
   const row = {
     id: createResourceId("memos"),
     userId: user.id,
@@ -170,9 +200,16 @@ export async function listMemos(
   db: FlareMoDb,
   user: UserRow,
   query: ListMemosQuery,
+  options: MemoFilterOptions = {},
 ): Promise<MemoListResult> {
-  return listMemosForViewer(db, user, query);
+  return listMemosForViewer(db, user, query, options);
 }
+
+/** Optional list-scanning knobs threaded from the worker's env. */
+export type MemoFilterOptions = {
+  /** Upper bound for candidate rows scanned for a not-fully-translatable CEL filter. */
+  celScanLimit?: number;
+};
 
 /**
  * List memos using the same visibility boundary as the Memos API. An
@@ -184,6 +221,7 @@ export async function listMemosForViewer(
   db: FlareMoDb,
   user: UserRow | null,
   query: ListMemosQuery,
+  options: MemoFilterOptions = {},
 ): Promise<MemoListResult> {
   const search = parseMemoSearchQuery(query.q);
   const celFilter = compileMemoFilter(query.filter);
@@ -309,20 +347,25 @@ export async function listMemosForViewer(
   // If the bounded window contains a complete page plus a lookahead match,
   // the existing cursor safely resumes after that page. Otherwise require a
   // narrower query rather than silently claiming that a partial scan is final.
-  const scanLimit = 5_000;
+  // A CEL filter that fully translates to SQL (checked by completeInSql) is
+  // evaluated by SQLite itself and needs neither the JS scan nor the limit.
+  const fullyPushedDown = celFilter?.completeInSql === true;
+  const scanLimit = options.celScanLimit ?? DEFAULT_MEMO_FILTER_SCAN_LIMIT;
   const candidates = await orderedQuery.limit(
-    celFilter ? scanLimit + 1 : query.page_size + 1,
+    celFilter && !fullyPushedDown ? scanLimit + 1 : query.page_size + 1,
   );
-  const rows = celFilter
-    ? candidates.slice(0, scanLimit).filter((memo) => celFilter(memo, user))
-    : candidates;
+  const rows =
+    celFilter && !fullyPushedDown
+      ? candidates.slice(0, scanLimit).filter((memo) => celFilter(memo, user))
+      : candidates;
   if (
     celFilter &&
+    !fullyPushedDown &&
     candidates.length > scanLimit &&
     rows.length <= query.page_size
   ) {
     throw new ValidationError(
-      "Filter scan limit reached (5000 memos). Narrow the query using a tag, date range, state, or visibility.",
+      `Filter scan limit reached (${scanLimit} memos). Narrow the query using a tag, date range, state, or visibility.`,
     );
   }
 
@@ -572,7 +615,13 @@ export async function updateMemo(
   const tags = metadataChanged
     ? normalizeMemoTags(nextPayload.tags ?? extractTags(nextContent))
     : [];
-  if (metadataChanged) nextPayload.tags = tags;
+  if (metadataChanged) {
+    nextPayload.tags = tags;
+    nextPayload.property = {
+      ...nextPayload.property,
+      has_incomplete_tasks: hasUncheckedTaskList(nextContent),
+    };
+  }
 
   const shouldCreateRevision =
     input.content !== undefined ||
@@ -721,6 +770,23 @@ export async function updateMemo(
   return getMemoById(db, user, id, { includeDeleted: true });
 }
 
+/**
+ * Recycle-bin TTL sweep candidates: trashed memos whose `deletedAt` fell
+ * behind the retention cutoff. Trash purging hard-deletes these together
+ * with their attachment binaries (see the worker's scheduled maintenance).
+ */
+export async function listExpiredTrashedMemos(
+  db: FlareMoDb,
+  cutoff: string,
+  limit = 200,
+) {
+  return db
+    .select({ id: memos.id, userId: memos.userId })
+    .from(memos)
+    .where(and(eq(memos.status, "trashed"), lt(memos.deletedAt, cutoff)))
+    .limit(limit);
+}
+
 export async function moveMemoToTrash(
   db: FlareMoDb,
   user: UserRow,
@@ -758,8 +824,15 @@ export async function hardDeleteMemo(
     operation: "delete",
     createdAt: now,
   });
+  // Attachment rows are only marked `deleting`, never dropped here: the daily
+  // GC removes the binary from R2 and then deletes the rows. This way even a
+  // hard-delete path that skips `markMemoAttachmentsDeleting` cannot orphan
+  // the object — the rows let the cron predicate find it forever.
   await db.batch([
-    db.delete(attachments).where(eq(attachments.memoId, id)),
+    db
+      .update(attachments)
+      .set({ state: "deleting", updatedAt: now })
+      .where(eq(attachments.memoId, id)),
     eventStatement,
     webhookEventStatement,
     embeddingTaskStatement,
@@ -826,6 +899,12 @@ export function normalizeMemoClientId(value: unknown) {
   if (typeof value !== "string") return undefined;
   const clientId = value.trim();
   return clientId && clientId.length <= 128 ? clientId : undefined;
+}
+
+// Unchecked item of a Markdown task list: `- [ ]`, `* [ ]`, `+ [ ]` or an
+// ordered `1. [ ]` variant, at the start of a line.
+export function hasUncheckedTaskList(content: string): boolean {
+  return /(?:^|\n)[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[ \]/.test(content);
 }
 
 function encodePageToken(value: MemoCursor) {

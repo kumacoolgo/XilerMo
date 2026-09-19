@@ -1,4 +1,4 @@
-import { Component, lazy, type ReactNode, Suspense } from "react";
+import { Component, lazy, memo, type ReactNode, Suspense } from "react";
 
 const MarkdownMemoContent = lazy(() =>
   import("./memo-content").then((module) => ({ default: module.MemoContent })),
@@ -38,12 +38,16 @@ class MemoContentErrorBoundary extends Component<
   }
 }
 
-export function LazyMemoContent({
+export const LazyMemoContent = memo(function LazyMemoContent({
   className,
   content,
+  onTimestampClick,
+  withHeadingIds,
 }: {
   className?: string;
   content: string;
+  onTimestampClick?: (seconds: number) => void;
+  withHeadingIds?: boolean;
 }) {
   return (
     <MemoContentErrorBoundary
@@ -52,8 +56,13 @@ export function LazyMemoContent({
       <Suspense
         fallback={<PlainMemoContent className={className} content={content} />}
       >
-        <MarkdownMemoContent className={className} content={content} />
+        <MarkdownMemoContent
+          className={className}
+          content={content}
+          onTimestampClick={onTimestampClick}
+          withHeadingIds={withHeadingIds}
+        />
       </Suspense>
     </MemoContentErrorBoundary>
   );
-}
+});

@@ -1,6 +1,7 @@
 import type {
   AppNotificationDto,
   AttachmentDto,
+  CalendarView,
   CreateMemoInput,
   CreateMemoryInput,
   CreateProjectInput,
@@ -66,6 +67,7 @@ export type UpdateMemoryRequest = UpdateMemoryInput;
 
 export type Project = ProjectDto;
 export type Task = TaskDto;
+export type Calendar = CalendarView;
 export type CreateProjectRequest = CreateProjectInput;
 export type UpdateProjectRequest = UpdateProjectInput;
 export type CreateTaskRequest = CreateTaskInput;
@@ -162,7 +164,10 @@ export class ApiError extends Error {
   }
 }
 
-export async function listMemos(params: ListMemoParams = {}) {
+export async function listMemos(
+  params: ListMemoParams = {},
+  signal?: AbortSignal,
+) {
   const query = new URLSearchParams();
   query.set("page_size", String(params.page_size ?? 30));
   query.set("order_by", "created_at desc");
@@ -173,15 +178,22 @@ export async function listMemos(params: ListMemoParams = {}) {
   if (params.include_deleted) query.set("include_deleted", "true");
   if (params.page_token) query.set("page_token", params.page_token);
 
-  return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`);
+  return apiRequest<ListMemosResponse>(`/api/app/memos?${query.toString()}`, {
+    signal,
+  });
 }
 
-export async function semanticSearchMemos(query: string, limit = 10) {
+export async function semanticSearchMemos(
+  query: string,
+  limit = 10,
+  signal?: AbortSignal,
+) {
   const params = new URLSearchParams();
   params.set("q", query);
   params.set("limit", String(limit));
   return apiRequest<{ memos: MemoDto[]; degraded: boolean }>(
     `/api/app/search/semantic?${params.toString()}`,
+    { signal },
   );
 }
 
@@ -388,7 +400,7 @@ export async function deleteProject(id: string) {
   );
 }
 
-// --- Tasks ------------------------------------------------------------------
+// --- Tasks & calendar ---------------------------------------------------------
 
 export async function listTasks(
   params: { project_id?: string; status?: Task["status"] } = {},
@@ -398,6 +410,19 @@ export async function listTasks(
   if (params.status) query.set("status", params.status);
   const suffix = query.toString() ? `?${query.toString()}` : "";
   return apiRequest<{ tasks: Task[] }>(`/api/app/tasks${suffix}`);
+}
+
+export async function getCalendarView(params: {
+  from: string;
+  to: string;
+  tz?: number;
+}) {
+  const query = new URLSearchParams({
+    from: params.from,
+    to: params.to,
+    tz: String(params.tz ?? 0),
+  });
+  return apiRequest<Calendar>(`/api/app/calendar?${query.toString()}`);
 }
 
 export async function createTask(input: CreateTaskRequest) {
@@ -491,6 +516,16 @@ export async function getLatestRelease(
       typeof release.published_at === "string" ? release.published_at : null,
     url: `https://github.com/${repo}/releases/tag/v${encodeURIComponent(version)}`,
   };
+}
+
+export type CaptureStatus = {
+  available: boolean;
+  provider: string | null;
+  streaming: boolean;
+};
+
+export async function getCaptureStatus() {
+  return apiRequest<CaptureStatus>("/api/app/capture/status");
 }
 
 export async function getBootstrapStatus() {
@@ -832,6 +867,34 @@ export async function hardDeleteMemo(id: string) {
   );
 }
 
+/**
+ * Reads an audio file's playback duration via a detached metadata probe so
+ * uploads report it in the attachment payload and the reading player can show
+ * the real length immediately. Best effort: any failure resolves undefined.
+ */
+async function readAudioDuration(file: File): Promise<number | undefined> {
+  if (!file.type.toLowerCase().startsWith("audio/")) return undefined;
+  const url = URL.createObjectURL(file);
+  const audio = document.createElement("audio");
+  return new Promise((resolve) => {
+    const settle = (value: number | undefined) => {
+      URL.revokeObjectURL(url);
+      resolve(
+        typeof value === "number" && Number.isFinite(value) && value > 0
+          ? Math.round(value)
+          : undefined,
+      );
+    };
+    audio.preload = "metadata";
+    audio.addEventListener("loadedmetadata", () => settle(audio.duration), {
+      once: true,
+    });
+    audio.addEventListener("error", () => settle(undefined), { once: true });
+    window.setTimeout(() => settle(undefined), 3000);
+    audio.src = url;
+  });
+}
+
 export async function uploadAttachment(input: {
   file: File;
   memo?: string;
@@ -845,10 +908,26 @@ export async function uploadAttachment(input: {
   if (input.clientId) {
     formData.set("client_id", input.clientId);
   }
+  const duration = await readAudioDuration(input.file);
+  if (duration !== undefined) {
+    formData.set("duration", String(duration));
+  }
   return apiRequest<Attachment>("/api/v1/attachments", {
     method: "POST",
     body: formData,
   });
+}
+
+/**
+ * Replaces a memo's attachment binding list. Used to claim attachments that
+ * were uploaded before their memo existed (inline image paste). The web
+ * client's default legacy wire takes bare resource names here.
+ */
+export async function bindMemoAttachments(memo: string, names: string[]) {
+  return apiRequest<{ attachments: Attachment[] }>(
+    `/api/v1/memos/${encodeURIComponent(memo)}/attachments`,
+    { method: "PATCH", body: JSON.stringify({ attachments: names }) },
+  );
 }
 
 export async function createShare(memo: string) {

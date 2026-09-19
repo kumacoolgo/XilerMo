@@ -1,4 +1,5 @@
 import type { ListMemosResponse } from "@flaremo/contracts";
+import { parseMemoSearchQuery } from "@flaremo/contracts/search-query";
 import type {
   InfiniteData,
   QueryClient,
@@ -22,6 +23,7 @@ import {
 import type { ExplorerView as ViewMode } from "@/components/flaremo-explorer";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/error";
+import type { MemoCaptureInput } from "@/lib/local-memo-capture";
 import { createMemoWithAttachments } from "@/lib/memo-submission";
 
 /**
@@ -42,6 +44,7 @@ export function useMemoMutations() {
   const invalidateWorkspace = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: ["memos"] }),
+      queryClient.invalidateQueries({ queryKey: ["semantic-search"] }),
       queryClient.invalidateQueries({ queryKey: ["memo-stats"] }),
       queryClient.invalidateQueries({ queryKey: ["tag-hierarchy"] }),
       queryClient.invalidateQueries({ queryKey: ["memo-context"] }),
@@ -62,13 +65,17 @@ export function useMemoMutations() {
   const { mutateAsync: createMemoAsync, isPending: isCreatingMemo } =
     useMutation({
       mutationFn: createMemoWithAttachments,
-      onSuccess: () => {
+      onMutate: (input) => prependOptimisticMemo(queryClient, input),
+      onError: (_error, _input, optimisticId) => {
+        // Roll the optimistic card back, then still refresh: a memo can be
+        // created before one of its attachment uploads loses the network
+        // response, so the durable memo must not stay hidden.
+        if (typeof optimisticId === "string") {
+          removeOptimisticMemo(queryClient, optimisticId);
+        }
         void invalidateWorkspace();
       },
-      // A memo can be created before one of its attachment uploads loses the
-      // network response. Refresh the list even on failure so the durable
-      // memo is not hidden while its queued attachment retry is pending.
-      onError: () => {
+      onSuccess: () => {
         void invalidateWorkspace();
       },
     });
@@ -182,6 +189,85 @@ type MemoSnapshot = Array<
   [QueryKey, InfiniteData<ListMemosResponse> | undefined]
 >;
 
+const OPTIMISTIC_PREFIX = "optimistic-";
+
+const optimisticMemoId = () =>
+  `${OPTIMISTIC_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+// Prepend the composer submission into every unfiltered timeline cache so the
+// new card appears before the server answers. Returns the optimistic id so
+// onError can roll it back; the settle invalidation replaces it with the
+// persisted record.
+function prependOptimisticMemo(
+  queryClient: QueryClient,
+  input: MemoCaptureInput,
+): string {
+  const id = optimisticMemoId();
+  const now = new Date().toISOString();
+  const optimisticMemo: Memo = {
+    name: id,
+    id,
+    content: input.content,
+    visibility: input.visibility ?? "private",
+    state: "normal",
+    pinned: false,
+    payload: {
+      ...(input.tags?.length ? { tags: input.tags } : {}),
+      ...(input.clientId ? { client_id: input.clientId } : {}),
+    },
+    create_time: now,
+    update_time: now,
+    display_time: now,
+    creator: "",
+    attachments: [],
+    can_manage: true,
+  };
+
+  for (const [queryKey, data] of queryClient.getQueriesData<
+    InfiniteData<ListMemosResponse>
+  >({ queryKey: ["memos"] })) {
+    // Only plain timelines (no view/search/tag filter, and not the "untagged"
+    // toggle) can safely show a brand-new private memo.
+    const [
+      view = "all",
+      query = undefined,
+      tag = undefined,
+      untagged = undefined,
+    ] = queryKey.slice(1) as [
+      ViewMode | undefined,
+      string | undefined,
+      string | undefined,
+      boolean | undefined,
+    ];
+    if (view !== "all" || query || tag || untagged || !data) continue;
+    queryClient.setQueryData<InfiniteData<ListMemosResponse>>(queryKey, {
+      ...data,
+      pages: data.pages.map((page, index) =>
+        index === 0
+          ? { ...page, memos: [optimisticMemo, ...page.memos] }
+          : page,
+      ),
+    });
+  }
+
+  return id;
+}
+
+function removeOptimisticMemo(queryClient: QueryClient, id: string) {
+  for (const [queryKey, data] of queryClient.getQueriesData<
+    InfiniteData<ListMemosResponse>
+  >({ queryKey: ["memos"] })) {
+    if (!data) continue;
+    queryClient.setQueryData<InfiniteData<ListMemosResponse>>(queryKey, {
+      ...data,
+      pages: data.pages.map((page) => ({
+        ...page,
+        memos: page.memos.filter((memo) => memo.id !== id),
+      })),
+    });
+  }
+}
+
 async function optimisticallyPatchMemo(
   queryClient: QueryClient,
   id: string,
@@ -197,6 +283,8 @@ async function optimisticallyPatchMemo(
   for (const [queryKey, data] of snapshots) {
     if (!data) continue;
     const view = queryKey[1] as ViewMode | undefined;
+    const search = typeof queryKey[2] === "string" ? queryKey[2].trim() : "";
+    const scope = parseMemoSearchQuery(search).scope;
     queryClient.setQueryData<InfiniteData<ListMemosResponse>>(queryKey, {
       ...data,
       pages: data.pages.map((page) => ({
@@ -209,7 +297,18 @@ async function optimisticallyPatchMemo(
             ...patch,
             update_time: new Date().toISOString(),
           };
-          return view && next.state !== viewToMemoState(view) ? [] : [next];
+          // Search includes archived notes unless an explicit scope narrows
+          // it. Editing a result must not apply the plain timeline filter.
+          const matchesState = search
+            ? scope === "trash"
+              ? next.state === "trashed"
+              : scope === "archive"
+                ? next.state === "archived"
+                : scope === "timeline"
+                  ? next.state === "normal"
+                  : next.state === "normal" || next.state === "archived"
+            : !view || next.state === viewToMemoState(view);
+          return matchesState ? [next] : [];
         }),
       })),
     });

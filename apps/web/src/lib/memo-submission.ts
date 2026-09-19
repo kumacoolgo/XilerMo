@@ -1,4 +1,9 @@
-import { ApiError, createMemo, uploadAttachment } from "@/api";
+import {
+  ApiError,
+  bindMemoAttachments,
+  createMemo,
+  uploadAttachment,
+} from "@/api";
 import type { TranslationKey } from "@/i18n";
 import type { MemoCaptureInput } from "@/lib/local-memo-capture";
 
@@ -9,6 +14,13 @@ export async function createMemoWithAttachments(input: MemoCaptureInput) {
     payload: { tags: input.tags, client_id: input.clientId },
     source: "web",
   });
+
+  // Inline-pasted images were uploaded before the memo existed; claim them
+  // first — the bind replaces the (still empty) list, so it must run before
+  // the per-file uploads below append to it.
+  if (input.preuploadedAttachmentNames?.length) {
+    await bindMemoAttachments(memo.name, input.preuploadedAttachmentNames);
+  }
 
   // A mobile queue can hold many large files. Upload them in order so a
   // transient failure stops early, and each retry only replays stable ids.

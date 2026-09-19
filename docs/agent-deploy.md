@@ -50,6 +50,12 @@ Cloudflare 打包验证：
 pnpm deploy:dry-run
 ```
 
+如果本次部署启用 Voice Capture，先验证生产 Wrangler 配置：
+
+```bash
+pnpm capture:production:check
+```
+
 配置生产认证 secrets（交互式输入，不要把值写进命令行参数、仓库或日志）：
 
 ```bash
@@ -57,6 +63,21 @@ pnpm exec wrangler secret put BETTER_AUTH_SECRET --config ./wrangler.jsonc
 pnpm exec wrangler secret put FLAREMO_BOOTSTRAP_SECRET --config ./wrangler.jsonc
 # 仅在批准的 operator recovery 窗口临时执行；成功后立即 rotate/delete。
 pnpm exec wrangler secret put FLAREMO_RECOVERY_SECRET --config ./wrangler.jsonc
+```
+
+Voice Capture 根据 `FLAREMO_ASR_PROVIDER` 选择一组交互式 secret 命令。腾讯使用前两项，DashScope 使用第三项；腾讯私有临时热词表存在时再设置第四项：
+
+```bash
+pnpm exec wrangler secret put FLAREMO_ASR_TENCENT_SECRET_ID --config ./wrangler.jsonc
+pnpm exec wrangler secret put FLAREMO_ASR_TENCENT_SECRET_KEY --config ./wrangler.jsonc
+pnpm exec wrangler secret put FLAREMO_ASR_DASHSCOPE_API_KEY --config ./wrangler.jsonc
+pnpm exec wrangler secret put FLAREMO_ASR_TENCENT_HOTWORD_LIST --config ./wrangler.jsonc
+```
+
+配置完成后只读核对远端 secret 名称，不读取或输出值：
+
+```bash
+pnpm capture:production:check -- --remote
 ```
 
 Wrangler secret 不提供安全的值回读路径。Agent 只检查配置后的 bootstrap status，不得要求用户把 secret 重新粘贴、打印或通过命令行转交。
@@ -81,7 +102,7 @@ export FLAREMO_URL="https://<worker-name>.<account>.workers.dev"
 curl "$FLAREMO_URL/api/auth/flaremo/bootstrap/status"
 ```
 
-首次安装必须由部署者在浏览器打开 `https://<your-flaremo-origin>/setup`，并在生产 HTTPS 页面手动输入 `FLAREMO_BOOTSTRAP_SECRET`、初始用户名、显示名、邮箱和 12–128 个字符的初始密码。如果启用了 Cloudflare Access，先通过外层 policy 再打开 `/setup`。Agent 不得要求用户把这些值粘贴到聊天、命令行、shell history、issue、日志或 Agent 输出，也不得代用户调用 bootstrap endpoint；部署者完成页面提交后，Agent 只能检查 bootstrap status 和登录结果。
+首次安装必须由部署者在浏览器打开 `https://<your-flaremo-origin>/setup`，并在生产 HTTPS 页面手动输入 `FLAREMO_BOOTSTRAP_SECRET`、初始用户名、显示名、邮箱和 8–128 个字符的初始密码。如果启用了 Cloudflare Access，先通过外层 policy 再打开 `/setup`。Agent 不得要求用户把这些值粘贴到聊天、命令行、shell history、issue、日志或 Agent 输出，也不得代用户调用 bootstrap endpoint；部署者完成页面提交后，Agent 只能检查 bootstrap status 和登录结果。
 
 bootstrap endpoint 只保留给明确批准的受控初始化流程；本 runbook 不提供把 secret 或密码放进环境变量、命令行参数或非交互 `curl` 的示例。已完成 bootstrap 后的密码破窗恢复使用单独的 `FLAREMO_RECOVERY_SECRET`，重置现有 owner、撤销全部 session/PAT，不创建第二个 owner；恢复成功后立即轮换或删除该 secret。若 bootstrap 因部分写入进入 `recovery_required`，使用同一 secret 调用 operator-only `POST /api/auth/flaremo/recover-bootstrap` 只协调既有身份映射；该接口不接受用户名、密码，不会重新开放 signup，遇到多个身份或 link 会返回 `409`。
 

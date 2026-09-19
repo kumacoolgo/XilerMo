@@ -1,5 +1,12 @@
-import { CircleAlertIcon, InboxIcon, Loader2Icon } from "lucide-react";
+import {
+  CircleAlertIcon,
+  InboxIcon,
+  Loader2Icon,
+  SearchIcon,
+} from "lucide-react";
+import { memo } from "react";
 import type { Attachment, Memo, MemoVisibility, Share } from "@/api";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -18,12 +25,17 @@ type MemoListProps = {
   hasNextPage: boolean;
   isFetchingNextPage: boolean;
   isLoading: boolean;
+  isUpdating?: boolean;
+  isRetrying?: boolean;
+  isPaginationError?: boolean;
   memos: Memo[];
   attachmentsByMemo: Map<string, Attachment[]>;
   sharesByMemo: Map<string, Share>;
   searchQuery?: string;
   /** Overrides the generic empty-state copy (e.g. semantic search). */
   emptyDescription?: string;
+  emptyTitle?: string;
+  onClearFilters?: () => void;
   onArchive: (id: string) => void;
   onPin: (id: string, pinned: boolean) => void;
   onShare: (id: string) => void;
@@ -39,7 +51,29 @@ type MemoListProps = {
   onTagClick?: (tag: string) => void;
 };
 
-export function MemoList({
+function MemoCardSkeleton() {
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl border border-border/50 bg-card/50 px-3.5 py-4 shadow-xs">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Skeleton className="size-3.5 rounded-full" />
+          <Skeleton className="h-3 w-20 rounded" />
+        </div>
+        <Skeleton className="h-4 w-12 rounded" />
+      </div>
+      <div className="flex flex-col gap-1.5 py-1">
+        <Skeleton className="h-3.5 w-full rounded" />
+        <Skeleton className="h-3.5 w-3/4 rounded" />
+      </div>
+      <div className="flex items-center gap-1.5 pt-0.5">
+        <Skeleton className="h-5 w-14 rounded-full" />
+        <Skeleton className="h-5 w-16 rounded-full" />
+      </div>
+    </div>
+  );
+}
+
+export const MemoList = memo(function MemoList({
   isLoading,
   hasError,
   hasNextPage,
@@ -49,6 +83,11 @@ export function MemoList({
   sharesByMemo,
   searchQuery,
   emptyDescription,
+  emptyTitle,
+  onClearFilters,
+  isUpdating = false,
+  isRetrying = false,
+  isPaginationError = false,
   onArchive,
   onPin,
   onShare,
@@ -62,17 +101,22 @@ export function MemoList({
 }: MemoListProps) {
   const { t } = useI18n();
 
-  if (isLoading && !hasError) {
+  if (isLoading && !hasError && memos.length === 0) {
     return (
-      <div className="flex flex-col gap-4 pt-2 motion-safe:animate-fade">
-        <Skeleton className="h-20 rounded-xl" />
-        <Skeleton className="h-16 rounded-xl" />
-        <Skeleton className="h-24 rounded-xl" />
+      <div
+        role="status"
+        aria-label={t("common.loading")}
+        aria-busy="true"
+        className="flex flex-col gap-2.5 pt-1 motion-safe:animate-fade"
+      >
+        <MemoCardSkeleton />
+        <MemoCardSkeleton />
+        <MemoCardSkeleton />
       </div>
     );
   }
 
-  if (hasError) {
+  if (hasError && memos.length === 0) {
     return (
       <Empty className="min-h-64 text-muted-foreground motion-safe:animate-rise">
         <EmptyHeader>
@@ -86,7 +130,18 @@ export function MemoList({
           <EmptyDescription>{t("list.errorDescription")}</EmptyDescription>
         </EmptyHeader>
         <EmptyContent>
-          <Button size="sm" variant="outline" onClick={onRetry}>
+          <Button
+            disabled={isRetrying}
+            size="sm"
+            variant="outline"
+            onClick={onRetry}
+          >
+            {isRetrying && (
+              <Loader2Icon
+                className="motion-safe:animate-spin"
+                data-icon="inline-start"
+              />
+            )}
             {t("common.retry")}
           </Button>
         </EmptyContent>
@@ -99,23 +154,65 @@ export function MemoList({
       <Empty className="min-h-64 text-muted-foreground motion-safe:animate-rise">
         <EmptyHeader>
           <EmptyMedia
-            className="bg-flame-100 text-flame-600 dark:bg-flame-400/12 dark:text-flame-300"
+            className="bg-accent text-accent-foreground"
             variant="icon"
           >
-            <InboxIcon />
+            {onClearFilters ? <SearchIcon /> : <InboxIcon />}
           </EmptyMedia>
-          <EmptyTitle>{t("list.emptyTitle")}</EmptyTitle>
+          <EmptyTitle>{emptyTitle ?? t("list.emptyTitle")}</EmptyTitle>
           <EmptyDescription>
             {emptyDescription ?? t("list.emptyDescription")}
           </EmptyDescription>
         </EmptyHeader>
+        {onClearFilters && (
+          <EmptyContent>
+            <Button size="sm" variant="outline" onClick={onClearFilters}>
+              {t("common.clearFilters")}
+            </Button>
+          </EmptyContent>
+        )}
       </Empty>
     );
   }
 
+  const retryNotice = hasError ? (
+    <Alert className="flex items-center justify-between gap-3">
+      <AlertDescription>
+        {t(isPaginationError ? "list.loadMoreError" : "list.refreshError")}
+      </AlertDescription>
+      <Button
+        disabled={isRetrying}
+        size="sm"
+        variant="outline"
+        onClick={onRetry}
+      >
+        {isRetrying && (
+          <Loader2Icon
+            className="motion-safe:animate-spin"
+            data-icon="inline-start"
+          />
+        )}
+        {t("common.retry")}
+      </Button>
+    </Alert>
+  ) : null;
+
   return (
     <>
-      <div className="flex flex-col divide-y motion-safe:animate-fade">
+      {!isPaginationError && retryNotice}
+      {isUpdating && (
+        <div role="status" className="sr-only">
+          <Loader2Icon
+            aria-hidden="true"
+            className="size-3.5 motion-safe:animate-spin"
+          />
+          {t("list.updating")}
+        </div>
+      )}
+      <div
+        aria-busy={isUpdating}
+        className="flex flex-col gap-2.5 motion-safe:animate-fade"
+      >
         {memos.map((memo, index) => (
           <MemoCard
             attachments={attachmentsByMemo.get(memo.name) ?? []}
@@ -136,7 +233,8 @@ export function MemoList({
           />
         ))}
       </div>
-      {hasNextPage && (
+      {isPaginationError && retryNotice}
+      {hasNextPage && !hasError && (
         <div className="flex justify-center py-5">
           <Button
             disabled={isFetchingNextPage}
@@ -145,7 +243,10 @@ export function MemoList({
             onClick={onLoadMore}
           >
             {isFetchingNextPage && (
-              <Loader2Icon className="animate-spin" data-icon="inline-start" />
+              <Loader2Icon
+                className="motion-safe:animate-spin"
+                data-icon="inline-start"
+              />
             )}
             {isFetchingNextPage ? t("common.loading") : t("list.loadMore")}
           </Button>
@@ -153,4 +254,4 @@ export function MemoList({
       )}
     </>
   );
-}
+});

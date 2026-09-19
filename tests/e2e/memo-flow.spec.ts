@@ -18,8 +18,10 @@ test("creates a memo and filters it by tag", async ({ page }) => {
   await expect(composer).toBeVisible();
 
   await composer.fill(content);
-  await page.getByRole("button", { name: /save|保存/i }).click();
-
+  await page.getByRole("button", { name: /save|保存|send|发送/i }).click();
+  // Submission is done when the composer clears; the card and the composer
+  // briefly both show the content while the optimistic insert lands.
+  await expect(composer).toHaveValue("");
   await expect(page.getByText(content)).toBeVisible();
   await expect(page.getByText(`#${tag}`, { exact: true })).toBeVisible();
 
@@ -57,7 +59,7 @@ test("queues an offline note and saves it after connectivity returns", async ({
   await expect(composer).toBeVisible();
   await page.context().setOffline(true);
   await composer.fill(content);
-  await page.getByRole("button", { name: /save|保存/i }).click();
+  await page.getByRole("button", { name: /save|保存|send|发送/i }).click();
   await expect(page.getByText(/offline|离线/i)).toBeVisible();
 
   await page.context().setOffline(false);
@@ -231,7 +233,7 @@ test("keeps a composer draft when saving fails", async ({ page }) => {
   await page.goto("/");
   const composer = page.getByRole("textbox", { name: /new note|新笔记/i });
   await composer.fill(content);
-  await page.getByRole("button", { name: /save|保存/i }).click();
+  await page.getByRole("button", { name: /save|保存|send|发送/i }).click();
 
   await expect(page.getByText("temporary create failure")).toBeVisible();
   await expect(composer).toHaveValue(content);
@@ -244,8 +246,13 @@ test("edits and shares a memo", async ({ page }) => {
 
   await page.goto("/");
   await page.getByRole("textbox", { name: /new note|新笔记/i }).fill(content);
-  await page.getByRole("button", { name: /save|保存/i }).click();
-  await expect(page.getByText(content)).toBeVisible();
+  await page.getByRole("button", { name: /save|保存|send|发送/i }).click();
+  await expect(
+    page.getByRole("textbox", { name: /new note|新笔记/i }),
+  ).toHaveValue("");
+  await expect(
+    page.locator("article").filter({ hasText: content }),
+  ).toBeVisible();
 
   const card = page.locator("article").filter({ hasText: content });
   await card.getByRole("button", { name: /actions|操作/i }).click();
@@ -263,8 +270,16 @@ test("edits and shares a memo", async ({ page }) => {
   ).toHaveCount(0);
 
   const updatedCard = page.locator("article").filter({ hasText: updated });
+  // Share now opens the Feishu-style dialog: pick public, confirm, and the
+  // public link appears on the card.
   await updatedCard.getByRole("button", { name: /actions|操作/i }).click();
   await page.getByRole("menuitem", { name: /share|分享/i }).click();
+  const shareDialog = page.getByRole("dialog");
+  await shareDialog
+    .getByRole("button", { name: /全网公开|Public web/i })
+    .click();
+  await shareDialog.getByRole("button", { name: /保存|^Save$/i }).click();
+  await expect(shareDialog).toHaveCount(0);
   await expect(updatedCard.getByText(/\/share\//)).toBeVisible();
 });
 
@@ -273,8 +288,13 @@ test("archives and restores a memo", async ({ page }) => {
 
   await page.goto("/");
   await page.getByRole("textbox", { name: /new note|新笔记/i }).fill(content);
-  await page.getByRole("button", { name: /save|保存/i }).click();
-  await expect(page.getByText(content)).toBeVisible();
+  await page.getByRole("button", { name: /save|保存|send|发送/i }).click();
+  await expect(
+    page.getByRole("textbox", { name: /new note|新笔记/i }),
+  ).toHaveValue("");
+  await expect(
+    page.locator("article").filter({ hasText: content }),
+  ).toBeVisible();
 
   const card = page.locator("article").filter({ hasText: content });
   await card.getByRole("button", { name: /actions|操作/i }).click();
@@ -300,8 +320,13 @@ test("trashes, restores, and hard-deletes a memo", async ({ page }) => {
 
   await page.goto("/");
   await page.getByRole("textbox", { name: /new note|新笔记/i }).fill(content);
-  await page.getByRole("button", { name: /save|保存/i }).click();
-  await expect(page.getByText(content)).toBeVisible();
+  await page.getByRole("button", { name: /save|保存|send|发送/i }).click();
+  await expect(
+    page.getByRole("textbox", { name: /new note|新笔记/i }),
+  ).toHaveValue("");
+  await expect(
+    page.locator("article").filter({ hasText: content }),
+  ).toBeVisible();
 
   const card = page.locator("article").filter({ hasText: content });
   await card.getByRole("button", { name: /actions|操作/i }).click();
@@ -371,8 +396,9 @@ test("shows the installed version and safe update fallback", async ({
 
   await page.goto("/");
 
+  // Up-to-date state names itself; the version pin lives next to the bell.
   const updateButton = page.getByRole("button", {
-    name: /system update|系统更新/i,
+    name: /up to date|已是最新|update/i,
   });
   await expect(updateButton).toBeVisible();
   await expect(updateButton).toContainText(version);
@@ -381,9 +407,14 @@ test("shows the installed version and safe update fallback", async ({
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText(version);
+  // No update is available, so the dialog carries no upgrade action: only the
+  // release-notes link (self-hosted fallback opens the guide instead).
   await expect(
     dialog.getByRole("link", { name: /update guide|升级指南/i }),
-  ).toHaveAttribute("href", /docs\/update\.md$/);
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByRole("link", { name: /release notes|版本说明/i }),
+  ).toBeVisible();
 });
 
 test("creates, follows, reads, and removes memo relations", async ({
@@ -419,32 +450,34 @@ test("creates, follows, reads, and removes memo relations", async ({
       .locator("..")
       .getByRole("link", { name: new RegExp(targetContent) }),
   ).toBeVisible();
-  // The related-notes panel on the content tab ranks the linked note first.
-  await page.getByRole("tab", { name: /content|内容/i }).click();
-  const related = page.getByRole("heading", {
-    name: /related notes|相关记录/i,
-  });
+
+  // The review graph links the referenced note directly.
+  const graph = page.getByRole("heading", { name: /graph|关系图/i });
   await expect(
-    related
-      .locator("..")
-      .getByRole("link", { name: new RegExp(targetContent) }),
+    graph.locator("..").getByRole("link", { name: new RegExp(targetContent) }),
   ).toBeVisible();
+  await graph
+    .locator("..")
+    .getByRole("link", { name: new RegExp(targetContent) })
+    .click();
+  await expect(page).toHaveURL(new RegExp(target.id));
 
   await page.goto(`/memo/${target.id}`);
-  // The related-notes panel on the content tab ranks the directly linked
-  // note first.
+  await page.getByRole("tab", { name: /links|关联/i }).click();
+  // The referenced note sees the source under "referenced by".
+  const backlinked = page
+    .getByRole("heading", { name: /referenced by|被谁引用/i })
+    .locator("..");
+  await expect(
+    backlinked.getByRole("link", { name: new RegExp(sourceContent) }),
+  ).toBeVisible();
+
+  // The related-notes panel ranks the directly linked note first, and the
+  // relations tab keeps the link visible under "referenced by".
+  await page.getByRole("tab", { name: /content|内容/i }).click();
   await expect(
     page
       .getByRole("heading", { name: /related notes|相关记录/i })
-      .locator("..")
-      .getByRole("link", { name: new RegExp(sourceContent) }),
-  ).toBeVisible();
-  await page.getByRole("tab", { name: /links|关联/i }).click();
-  const backlinks = page.getByRole("heading", {
-    name: /referenced by|被谁引用/i,
-  });
-  await expect(
-    backlinks
       .locator("..")
       .getByRole("link", { name: new RegExp(sourceContent) }),
   ).toBeVisible();

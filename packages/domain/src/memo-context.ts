@@ -6,7 +6,7 @@ import {
   memos,
   shares,
 } from "@flaremo/db";
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { parseResourceName } from "./ids";
 import { listMemoriesForMemo } from "./memory";
 import { getMemoById } from "./memos";
@@ -32,7 +32,10 @@ export async function getMemoContextData(
             isNull(attachments.deletedAt),
             eq(attachments.state, "ready"),
           ),
-        ),
+        )
+        // Match the list endpoints' ordering so the reading view picks the
+        // same main track everywhere.
+        .orderBy(desc(attachments.createdAt)),
       db
         .select()
         .from(shares)
