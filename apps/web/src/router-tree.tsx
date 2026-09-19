@@ -86,6 +86,16 @@ const ProjectsPage = lazy(() =>
     default: module.ProjectsPage,
   })),
 );
+const CalendarPage = lazy(() =>
+  import("@/pages/calendar-page").then((module) => ({
+    default: module.CalendarPage,
+  })),
+);
+const CapturePage = lazy(() =>
+  import("@/pages/capture-page").then((module) => ({
+    default: module.CapturePage,
+  })),
+);
 
 function PublicShareRoutePage() {
   const { token } = shareRoute.useParams();
@@ -342,6 +352,38 @@ const projectsRoute = createRoute({
   component: ProjectsRoutePage,
 });
 
+function CalendarRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <CalendarPage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+function CaptureRoutePage() {
+  return (
+    <AuthenticatedRoute>
+      <Suspense fallback={<RouteLoading />}>
+        <CapturePage />
+      </Suspense>
+    </AuthenticatedRoute>
+  );
+}
+
+const calendarRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/calendar",
+  component: CalendarRoutePage,
+});
+
+const captureRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/capture",
+  component: CaptureRoutePage,
+});
+
 const router = createRouter({
   defaultPreload: "intent",
   routeTree: rootRoute.addChildren([
@@ -361,6 +403,8 @@ const router = createRouter({
     randomWalkRoute,
     memoryRoute,
     projectsRoute,
+    calendarRoute,
+    captureRoute,
   ]),
   scrollRestoration: true,
 });

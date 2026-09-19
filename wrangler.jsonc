@@ -66,9 +66,15 @@
     "FLAREMO_EMBEDDING_PROVIDER": "workers-ai",
     "FLAREMO_EMBEDDING_MODEL": "@cf/qwen/qwen3-embedding-0.6b",
     "FLAREMO_EMBEDDING_DIMENSIONS": "1024",
+    // Optional voice capture. Provider credentials must be Worker secrets.
+    "FLAREMO_ASR_PROVIDER": "dashscope",
+    "FLAREMO_ASR_MODEL": "",
+    "FLAREMO_ASR_TENCENT_APP_ID": "",
+    "FLAREMO_ASR_TENCENT_HOTWORD_ID": "",
     // Self-measured vector usage limits for the usage panel. Defaults are the
     // Workers Free Vectorize allowance (5M stored / 30M queried dims per month).
     "FLAREMO_VECTORIZE_STORED_LIMIT": "5000000",
-    "FLAREMO_VECTORIZE_QUERIED_LIMIT": "30000000"
+    "FLAREMO_VECTORIZE_QUERIED_LIMIT": "30000000",
+    "FLAREMO_MEMO_FILTER_SCAN_LIMIT": "5000"
   }
 }

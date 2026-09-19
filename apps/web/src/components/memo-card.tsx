@@ -13,8 +13,10 @@ import {
   ShieldIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useState } from "react";
+import { memo, useState } from "react";
+import { toast } from "sonner";
 import type { Attachment, Memo, MemoState, MemoVisibility, Share } from "@/api";
+import { uploadAttachment } from "@/api";
 import { AttachmentGallery } from "@/components/attachment-gallery";
 import { LazyMemoContent } from "@/components/lazy-memo-content";
 import { MemoSearchExcerpt } from "@/components/memo-search-excerpt";
@@ -31,6 +33,14 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
@@ -38,8 +48,13 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useI18n } from "@/i18n";
+import { filterUnreferencedAttachments } from "@/lib/attachment-refs";
+import {
+  extractImageFiles,
+  inlineImageMarkdown,
+  insertSnippetAt,
+} from "@/lib/image-insert";
 import {
   extractTags,
   formatMemoRelativeTime,
@@ -47,6 +62,9 @@ import {
   getMemoResourceId,
 } from "@/lib/memo";
 import { cn } from "@/lib/utils";
+
+/** Bodies beyond this size collapse in the timeline. */
+const COLLAPSE_THRESHOLD = 600;
 
 type MemoCardProps = {
   memo: Memo;
@@ -70,7 +88,7 @@ type MemoCardProps = {
   canManage?: boolean;
 };
 
-export function MemoCard({
+export const MemoCard = memo(function MemoCard({
   memo,
   attachments,
   onArchive,
@@ -93,18 +111,84 @@ export function MemoCard({
     : undefined;
   const tags = memo.payload.tags ?? extractTags(memo.content);
   const isTrashed = memo.state === "trashed";
+  // Body-referenced images render inline; the gallery keeps only the rest.
+  const galleryAttachments = filterUnreferencedAttachments(
+    attachments,
+    memo.content,
+  );
+  // Long bodies (transcripts, articles) collapse so one memo cannot dominate
+  // the timeline. Expanded state is per-card and resets on remount.
+  const isCollapsible =
+    memo.content.length > COLLAPSE_THRESHOLD ||
+    memo.content.split("\n").length > 12;
+  const [expanded, setExpanded] = useState(false);
+  const collapsed = isCollapsible && !expanded;
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isUploadingInline, setIsUploadingInline] = useState(false);
+
+  // Editing an existing memo: pasted images upload bound to the memo right
+  // away, so a cancelled edit leaves nothing to clean up except an
+  // unreferenced (but owned) attachment in the gallery.
+  const insertInlineImages = async (files: File[], caret: number) => {
+    if (files.length === 0) return;
+    setIsUploadingInline(true);
+    try {
+      let content = draftContent;
+      let cursor = Math.min(Math.max(caret, 0), content.length);
+      for (const file of files) {
+        const attachment = await uploadAttachment({ file, memo: memo.name });
+        const next = insertSnippetAt(
+          content,
+          cursor,
+          inlineImageMarkdown(attachment.id, attachment.filename),
+        );
+        content = next.content;
+        cursor = next.caret;
+      }
+      setDraftContent(content);
+    } catch {
+      toast.error(t("composer.imageUploadFailed"));
+    } finally {
+      setIsUploadingInline(false);
+    }
+  };
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [draftContent, setDraftContent] = useState(memo.content);
-  const [draftVisibility, setDraftVisibility] = useState<MemoVisibility>(
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  const [shareVisibility, setShareVisibility] = useState<MemoVisibility>(
     memo.visibility,
   );
+  const [isSharing, setIsSharing] = useState(false);
 
   const startEditing = () => {
     setDraftContent(memo.content);
-    setDraftVisibility(memo.visibility);
     setIsEditing(true);
+  };
+
+  const openShareDialog = () => {
+    setShareVisibility(memo.visibility);
+    setIsShareOpen(true);
+  };
+
+  // Feishu-style share panel: visibility changed after publishing; picking
+  // the public option also provisions the public link token.
+  const saveSharing = async () => {
+    setIsSharing(true);
+    try {
+      await onUpdate(id, {
+        content: memo.content,
+        visibility: shareVisibility,
+      });
+      if (shareVisibility === "public" && !share) {
+        onShare(id);
+      }
+      setIsShareOpen(false);
+    } catch {
+      // The mutation displays the error and the dialog stays open.
+    } finally {
+      setIsSharing(false);
+    }
   };
 
   const saveEditing = async () => {
@@ -112,7 +196,7 @@ export function MemoCard({
     try {
       await onUpdate(id, {
         content: draftContent,
-        visibility: draftVisibility,
+        visibility: memo.visibility,
       });
       setIsEditing(false);
     } catch {
@@ -125,7 +209,9 @@ export function MemoCard({
   return (
     <article
       className={cn(
-        "group relative flex w-full flex-col gap-2 rounded-xl px-3 py-4 text-card-foreground [content-visibility:auto] [contain-intrinsic-size:auto_120px] motion-safe:transition-[background-color,transform,box-shadow] motion-safe:duration-150 hover:bg-card hover:shadow-xs motion-safe:hover:-translate-y-px",
+        "group relative flex w-full flex-col gap-2 rounded-xl border border-border/50 bg-card/60 px-3.5 py-4 text-card-foreground [content-visibility:auto] [contain-intrinsic-size:auto_120px] motion-safe:animate-rise motion-safe:transition-[background-color,border-color,transform,box-shadow] motion-safe:duration-150 hover:border-border hover:bg-card hover:shadow-xs motion-safe:hover:-translate-y-px",
+        memo.pinned &&
+          "border-flame-300/40 bg-flame-50/35 dark:border-flame-400/25 dark:bg-flame-400/5",
         isEditing && "bg-card shadow-xs ring-1 ring-flame-400/40",
       )}
       style={{ animationDelay: `${Math.min(index, 7) * 35}ms` }}
@@ -201,7 +287,7 @@ export function MemoCard({
                           ? t("memo.moveToTimeline")
                           : t("view.archive")}
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => onShare(id)}>
+                      <DropdownMenuItem onClick={openShareDialog}>
                         <Share2Icon />
                         {t("memo.share")}
                       </DropdownMenuItem>
@@ -227,42 +313,38 @@ export function MemoCard({
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                 event.preventDefault();
-                void saveEditing();
+                if (!isUploadingInline) void saveEditing();
               }
               if (event.key === "Escape") {
                 event.preventDefault();
                 setIsEditing(false);
               }
             }}
+            onDragOver={(event) => {
+              if (event.dataTransfer.types.includes("Files")) {
+                event.preventDefault();
+              }
+            }}
+            onDrop={(event) => {
+              const files = extractImageFiles(event.dataTransfer.files);
+              if (files.length === 0) return;
+              event.preventDefault();
+              void insertInlineImages(
+                files,
+                event.currentTarget.selectionStart ?? draftContent.length,
+              );
+            }}
+            onPaste={(event) => {
+              const files = extractImageFiles(event.clipboardData.files);
+              if (files.length === 0) return;
+              event.preventDefault();
+              void insertInlineImages(
+                files,
+                event.currentTarget.selectionStart ?? draftContent.length,
+              );
+            }}
           />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <ToggleGroup
-              type="single"
-              value={draftVisibility}
-              onValueChange={(value) => {
-                if (!value) return;
-                if (
-                  value === "public" &&
-                  draftVisibility !== "public" &&
-                  !window.confirm(t("visibility.publicConfirm"))
-                ) {
-                  return;
-                }
-                setDraftVisibility(value as MemoVisibility);
-              }}
-              size="sm"
-              variant="outline"
-            >
-              <ToggleGroupItem value="private">
-                {t("visibility.private")}
-              </ToggleGroupItem>
-              <ToggleGroupItem value="protected">
-                {t("visibility.protected")}
-              </ToggleGroupItem>
-              <ToggleGroupItem value="public">
-                {t("visibility.public")}
-              </ToggleGroupItem>
-            </ToggleGroup>
             <div className="flex items-center gap-2">
               <Button
                 disabled={isSaving}
@@ -273,7 +355,7 @@ export function MemoCard({
                 {t("common.cancel")}
               </Button>
               <Button
-                disabled={isSaving || !draftContent.trim()}
+                disabled={isSaving || isUploadingInline || !draftContent.trim()}
                 size="sm"
                 onClick={() => void saveEditing()}
               >
@@ -290,13 +372,35 @@ export function MemoCard({
         </div>
       ) : (
         <div>
-          <LazyMemoContent content={memo.content} />
+          <div className="relative">
+            <div
+              className={cn(
+                collapsed && "max-h-52 overflow-hidden",
+                !collapsed && "transition-[max-height]",
+              )}
+            >
+              <LazyMemoContent content={memo.content} />
+            </div>
+            {collapsed && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-card to-transparent" />
+            )}
+          </div>
+          {isCollapsible && (
+            <Button
+              className="mt-1.5"
+              onClick={() => setExpanded((value) => !value)}
+              size="sm"
+              variant="ghost"
+            >
+              {collapsed ? t("reading.expand") : t("reading.collapse")}
+            </Button>
+          )}
           {searchQuery && (
             <MemoSearchExcerpt content={memo.content} query={searchQuery} />
           )}
-          {attachments.length > 0 && (
+          {galleryAttachments.length > 0 && (
             <div className="mt-3">
-              <AttachmentGallery attachments={attachments} />
+              <AttachmentGallery attachments={galleryAttachments} />
             </div>
           )}
           {share && shareUrl && (
@@ -365,9 +469,92 @@ export function MemoCard({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <Dialog open={isShareOpen} onOpenChange={setIsShareOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("share.title")}</DialogTitle>
+            <DialogDescription>{t("share.subtitle")}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-1.5">
+            {(
+              [
+                ["private", LockIcon],
+                ["protected", ShieldIcon],
+                ["public", Globe2Icon],
+              ] as const
+            ).map(([value, Icon]) => {
+              const selected = shareVisibility === value;
+              return (
+                <button
+                  aria-pressed={selected}
+                  className={cn(
+                    "flex items-start gap-2.5 rounded-lg border px-3 py-2.5 text-left text-sm motion-safe:transition-colors",
+                    selected
+                      ? "border-flame-400/60 bg-flame-400/8"
+                      : "border-transparent bg-muted/40 hover:bg-muted",
+                  )}
+                  key={value}
+                  type="button"
+                  onClick={() => setShareVisibility(value)}
+                >
+                  <Icon
+                    className={cn(
+                      "mt-0.5 size-4 shrink-0",
+                      selected ? "text-flame-500" : "text-muted-foreground",
+                    )}
+                  />
+                  <span className="flex min-w-0 flex-col gap-0.5">
+                    <span className="font-medium">
+                      {t(`visibility.${value}`)}
+                    </span>
+                    <span
+                      className={cn(
+                        "text-xs",
+                        selected
+                          ? "text-muted-foreground"
+                          : "text-muted-foreground/80",
+                      )}
+                    >
+                      {t(`share.desc.${value}`)}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {shareVisibility === "public" && shareUrl && (
+            <p className="truncate rounded-md bg-muted px-3 py-2 font-mono text-xs text-muted-foreground">
+              {shareUrl}
+            </p>
+          )}
+          <DialogFooter>
+            <Button
+              disabled={isSharing}
+              type="button"
+              variant="ghost"
+              onClick={() => setIsShareOpen(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={isSharing}
+              onClick={() => void saveSharing()}
+              type="button"
+            >
+              {isSharing && (
+                <Loader2Icon
+                  className="animate-spin"
+                  data-icon="inline-start"
+                />
+              )}
+              {t("share.confirm")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </article>
   );
-}
+});
 
 function VisibilityBadge({ visibility }: { visibility: MemoVisibility }) {
   const { t } = useI18n();

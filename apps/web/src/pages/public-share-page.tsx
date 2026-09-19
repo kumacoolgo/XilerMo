@@ -1,8 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { getPublicShare } from "@/api";
-import { AttachmentGallery } from "@/components/attachment-gallery";
 import { FlareMoLogo } from "@/components/flaremo-logo";
-import { LazyMemoContent } from "@/components/lazy-memo-content";
+import { MemoReadingView } from "@/components/reading/memo-reading-view";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Empty,
@@ -12,6 +11,7 @@ import {
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
+import { injectShareTokenIntoFileUrls } from "@/lib/attachment-refs";
 import { formatMemoTime } from "@/lib/memo";
 
 export function PublicSharePage({ token }: { token: string }) {
@@ -24,14 +24,9 @@ export function PublicSharePage({ token }: { token: string }) {
 
   return (
     <div className="min-h-svh bg-background px-4 py-6 sm:py-10">
-      <main className="mx-auto flex w-full max-w-2xl flex-col gap-4">
-        <header className="flex items-end justify-between border-b pb-4">
-          <div>
-            <FlareMoLogo labelClassName="text-lg" markClassName="size-7" />
-            <div className="text-sm text-muted-foreground">
-              {t("share.title")}
-            </div>
-          </div>
+      <main className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+        <header className="border-b pb-4">
+          <FlareMoLogo labelClassName="text-lg" markClassName="size-7" />
         </header>
         {shareQuery.isLoading && (
           <div className="flex flex-col gap-3">
@@ -50,18 +45,25 @@ export function PublicSharePage({ token }: { token: string }) {
           </Empty>
         )}
         {shareQuery.data && (
-          <Card>
+          // overflow-clip keeps the rounded clipping but, unlike the Card
+          // base's overflow-hidden, does not turn the card into a scroll
+          // container — the sticky reading transport needs the viewport as
+          // its scrollport.
+          <Card className="overflow-clip">
             <CardHeader>
               <CardTitle className="text-sm font-normal text-muted-foreground">
                 {formatMemoTime(shareQuery.data.memo.display_time, locale)}
               </CardTitle>
             </CardHeader>
             <CardContent className="flex flex-col gap-5">
-              <LazyMemoContent
-                className="text-base"
-                content={shareQuery.data.memo.content}
+              <MemoReadingView
+                attachments={shareQuery.data.attachments}
+                content={injectShareTokenIntoFileUrls(
+                  shareQuery.data.memo.content,
+                  token,
+                )}
+                contentClassName="text-base"
               />
-              <AttachmentGallery attachments={shareQuery.data.attachments} />
             </CardContent>
           </Card>
         )}

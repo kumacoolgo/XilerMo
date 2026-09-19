@@ -9,7 +9,7 @@ test.describe.configure({ mode: "serial" });
 
 const CUSTOM_PRODUCT_NAME = "KOS 知识库";
 
-test("anonymous visitors see the default FlareMo branding on the login page", async ({
+test("anonymous visitors see the default XilerMo branding on the login page", async ({
   page,
 }) => {
   await page.goto(`${E2E_BASE_URL}/login`);

@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useI18n } from "@/i18n";
 import { errorMessage } from "@/lib/error";
+import { InstallAppCard } from "./account/install-app-card";
 import { ProfilePanel } from "./account/profile-panel";
 import { MIN_PASSWORD_LENGTH, SecurityPanel } from "./account/security-panel";
 import { TokensPanel } from "./account/tokens-panel";
@@ -27,20 +28,14 @@ import { TransferPanel } from "./account/transfer-panel";
 import { UsagePanel } from "./account/usage-panel";
 import { AdminPanel, BrandingCard } from "./admin-page";
 
-type AccountTab =
-  | "profile"
-  | "security"
-  | "tokens"
-  | "transfer"
-  | "usage"
-  | "admin";
+type AccountTab = "account" | "usage" | "branding" | "admin";
 
 export function AccountPage() {
   const { locale, t } = useI18n();
   const navigate = useNavigate({ from: "/account" });
   const queryClient = useQueryClient();
   const session = authClient.useSession();
-  const [tab, setTab] = useState<AccountTab>("profile");
+  const [tab, setTab] = useState<AccountTab>("account");
   const [username, setUsername] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -297,10 +292,7 @@ export function AccountPage() {
           onValueChange={(value) => setTab(value as AccountTab)}
         >
           <TabsList className="w-full">
-            <TabsTrigger value="profile">{t("auth.tab.profile")}</TabsTrigger>
-            <TabsTrigger value="security">{t("auth.tab.security")}</TabsTrigger>
-            <TabsTrigger value="tokens">{t("auth.tab.tokens")}</TabsTrigger>
-            <TabsTrigger value="transfer">{t("auth.tab.transfer")}</TabsTrigger>
+            <TabsTrigger value="account">{t("auth.tab.account")}</TabsTrigger>
             <TabsTrigger value="usage">{t("auth.tab.usage")}</TabsTrigger>
             {isTeamAdmin && (
               <TabsTrigger value="branding">
@@ -312,84 +304,84 @@ export function AccountPage() {
             )}
           </TabsList>
 
-          <TabsContent value="profile" className="mt-4">
-            <ProfilePanel
-              currentUsername={session.data?.user.username ?? ""}
-              error={accountError}
-              isPending={updateUsernameMutation.isPending}
-              setUsername={setUsername}
-              t={t}
-              username={username}
-              onSubmit={handleUsernameSubmit}
-            />
-          </TabsContent>
+          <TabsContent value="account" className="mt-4">
+            <div className="flex flex-col gap-4">
+              <ProfilePanel
+                currentUsername={session.data?.user.username ?? ""}
+                error={accountError}
+                isPending={updateUsernameMutation.isPending}
+                setUsername={setUsername}
+                t={t}
+                username={username}
+                onSubmit={handleUsernameSubmit}
+              />
 
-          <TabsContent value="security" className="mt-4">
-            <SecurityPanel
-              changeEmailIsPending={changeEmailMutation.isPending}
-              changePasswordIsPending={changePasswordMutation.isPending}
-              currentEmail={session.data?.user.email ?? ""}
-              currentPassword={currentPassword}
-              deleteAccountIsPending={deleteAccountMutation.isPending}
-              deleteError={deleteError}
-              deletePassword={deletePassword}
-              emailCurrentPassword={emailCurrentPassword}
-              emailError={emailError}
-              emailVerificationPending={emailVerificationPending}
-              isOwner={meQuery.data?.role === "owner"}
-              newPassword={newPassword}
-              newPasswordConfirmation={newPasswordConfirmation}
-              passwordError={passwordError}
-              setCurrentPassword={setCurrentPassword}
-              setDeletePassword={setDeletePassword}
-              setEmailCurrentPassword={setEmailCurrentPassword}
-              setNewEmail={setNewEmail}
-              setNewPassword={setNewPassword}
-              setNewPasswordConfirmation={setNewPasswordConfirmation}
-              t={t}
-              newEmail={newEmail}
-              onEmailSubmit={handleEmailSubmit}
-              onPasswordSubmit={handlePasswordSubmit}
-              onDeleteAccount={handleDeleteAccount}
-            />
-          </TabsContent>
+              <InstallAppCard />
 
-          <TabsContent value="tokens" className="mt-4">
-            <TokensPanel
-              copied={copied}
-              createTokenIsPending={createTokenMutation.isPending}
-              createdToken={createdToken}
-              locale={locale}
-              revokingTokenId={
-                revokeTokenMutation.isPending
-                  ? revokeTokenMutation.variables
-                  : undefined
-              }
-              setTokenExpiryDays={setTokenExpiryDays}
-              setTokenName={setTokenName}
-              t={t}
-              tokenError={tokenError}
-              tokenExpiryDays={tokenExpiryDays}
-              tokenName={tokenName}
-              tokensQuery={tokensQuery}
-              onCopyToken={handleCopyToken}
-              onCreateToken={handleCreateToken}
-              onRevokeToken={handleRevokeToken}
-              onHideCreatedToken={() => setCreatedToken(null)}
-            />
+              <SecurityPanel
+                changeEmailIsPending={changeEmailMutation.isPending}
+                changePasswordIsPending={changePasswordMutation.isPending}
+                currentEmail={session.data?.user.email ?? ""}
+                currentPassword={currentPassword}
+                deleteAccountIsPending={deleteAccountMutation.isPending}
+                deleteError={deleteError}
+                deletePassword={deletePassword}
+                emailCurrentPassword={emailCurrentPassword}
+                emailError={emailError}
+                emailVerificationPending={emailVerificationPending}
+                isOwner={meQuery.data?.role === "owner"}
+                newPassword={newPassword}
+                newPasswordConfirmation={newPasswordConfirmation}
+                passwordError={passwordError}
+                setCurrentPassword={setCurrentPassword}
+                setDeletePassword={setDeletePassword}
+                setEmailCurrentPassword={setEmailCurrentPassword}
+                setNewEmail={setNewEmail}
+                setNewPassword={setNewPassword}
+                setNewPasswordConfirmation={setNewPasswordConfirmation}
+                t={t}
+                newEmail={newEmail}
+                onEmailSubmit={handleEmailSubmit}
+                onPasswordSubmit={handlePasswordSubmit}
+                onDeleteAccount={handleDeleteAccount}
+              />
+
+              <TokensPanel
+                copied={copied}
+                createTokenIsPending={createTokenMutation.isPending}
+                createdToken={createdToken}
+                locale={locale}
+                revokingTokenId={
+                  revokeTokenMutation.isPending
+                    ? revokeTokenMutation.variables
+                    : undefined
+                }
+                setTokenExpiryDays={setTokenExpiryDays}
+                setTokenName={setTokenName}
+                t={t}
+                tokenError={tokenError}
+                tokenExpiryDays={tokenExpiryDays}
+                tokenName={tokenName}
+                tokensQuery={tokensQuery}
+                onCopyToken={handleCopyToken}
+                onCreateToken={handleCreateToken}
+                onRevokeToken={handleRevokeToken}
+                onHideCreatedToken={() => setCreatedToken(null)}
+              />
+
+              <TransferPanel
+                dataTasksQuery={dataTasksQuery}
+                createExportIsPending={retryExportMutation.isPending}
+                retryExportIsPending={retryExportMutation.isPending}
+                t={t}
+                onCreateExport={() => retryExportMutation.mutate()}
+                onRetryExport={() => retryExportMutation.mutate()}
+              />
+            </div>
           </TabsContent>
 
           <TabsContent value="usage" className="mt-4">
             <UsagePanel t={t} vectorUsageQuery={vectorUsageQuery} />
-          </TabsContent>
-
-          <TabsContent value="transfer" className="mt-4">
-            <TransferPanel
-              dataTasksQuery={dataTasksQuery}
-              retryExportIsPending={retryExportMutation.isPending}
-              t={t}
-              onRetryExport={() => retryExportMutation.mutate()}
-            />
           </TabsContent>
 
           {isTeamAdmin && (

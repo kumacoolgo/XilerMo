@@ -1,22 +1,15 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  CalendarIcon,
   DownloadIcon,
   LanguagesIcon,
   MenuIcon,
-  SearchIcon,
   SettingsIcon,
-  SparklesIcon,
   UploadIcon,
+  XIcon,
 } from "lucide-react";
-import {
-  type RefObject,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   getMemoStats,
@@ -24,15 +17,23 @@ import {
   getVectorUsage,
   listMemos,
   type MemoStatsResponse,
+  type MemoVisibility,
   semanticSearchMemos,
 } from "@/api";
 import type { ExplorerView as ViewMode } from "@/components/flaremo-explorer";
 import { FlareMoExplorer } from "@/components/flaremo-explorer";
 import { InfoTip } from "@/components/info-tip";
-import { MemoComposer } from "@/components/memo-composer";
 import { MemoList } from "@/components/memo-list";
 import { NotificationBell } from "@/components/notification-bell";
+import { PwaUpdatePrompt } from "@/components/pwa-update-prompt";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Sheet,
@@ -41,23 +42,12 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { UpdateStatus } from "@/components/update-status";
+import { WorkspaceComposer } from "@/components/workspace-composer";
+import { WorkspaceSearch } from "@/components/workspace-search";
 import { useDataTransfer } from "@/hooks/use-data-transfer";
-import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import { useMemoMutations, viewToMemoState } from "@/hooks/use-memo-mutations";
-import { useNewMemoCapture } from "@/hooks/use-new-memo-capture";
 import { type TranslationKey, useI18n } from "@/i18n";
-import {
-  enqueueMemoSubmission,
-  flushQueuedMemoSubmissions,
-  getNewMemoDraftId,
-  isBrowserOnline,
-  type MemoCaptureInput,
-} from "@/lib/local-memo-capture";
-import {
-  shouldContinueQueuedSubmissionAfterFailure,
-  shouldQueueAfterFailure,
-  validateMemoCaptureSubmission,
-} from "@/lib/memo-submission";
+import { dayFilterFromQuery, formatDayTitle } from "@/lib/calendar-date";
 import { cn } from "@/lib/utils";
 import { AppRoutes } from "@/router-tree";
 import { indexRoute, registerWorkspaceComponent } from "@/routes/index-route";
@@ -76,60 +66,82 @@ const EMPTY_STATS: MemoStatsResponse = {
 registerWorkspaceComponent(FlareMoApp);
 
 export function FlareMoApp() {
-  const { t, toggleLocale } = useI18n();
+  const { locale, t, toggleLocale } = useI18n();
   const navigate = useNavigate({ from: "/" });
   const search = indexRoute.useSearch();
   const view = search.view ?? "all";
   const activeTag = search.tag;
   const untagged = Boolean(search.untagged);
   const query = search.q ?? "";
-  const setView = (nextView: ViewMode) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({ ...current, view: nextView }),
-    });
-  const setActiveTag = (tag: string | undefined) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({ ...current, tag, untagged: undefined }),
-    });
-  const setUntagged = (next: boolean) =>
+  const composeRequested = Boolean(search.compose);
+  // A query that is exactly one local day is not a text search; it renders as
+  // a removable date chip and the search box stays empty.
+  const dayFilter = dayFilterFromQuery(query);
+  const setView = useCallback(
+    (nextView: ViewMode) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({ ...current, view: nextView }),
+      });
+    },
+    [navigate],
+  );
+  const setActiveTag = useCallback(
+    (tag: string | undefined) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({ ...current, tag, untagged: undefined }),
+      });
+    },
+    [navigate],
+  );
+  const setUntagged = useCallback(
+    (next: boolean) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({
+          ...current,
+          tag: undefined,
+          untagged: next || undefined,
+        }),
+      });
+    },
+    [navigate],
+  );
+  const setQuery = useCallback(
+    (q: string) => {
+      void navigate({
+        replace: true,
+        search: (current) => ({
+          ...current,
+          q: q || undefined,
+          view: q.trim() ? "all" : "view" in current ? current.view : undefined,
+        }),
+      });
+    },
+    [navigate],
+  );
+  const clearFilters = useCallback(() => {
     void navigate({
       replace: true,
       search: (current) => ({
         ...current,
+        q: undefined,
         tag: undefined,
-        untagged: next ? true : undefined,
+        untagged: undefined,
       }),
     });
-  const setQuery = (q: string) =>
-    void navigate({
-      replace: true,
-      search: (current) => ({
-        ...current,
-        q: q || undefined,
-        // A text query includes timeline and archived notes by default; trash
-        // remains available through the explicit `in:trash` search operator.
-        view: q.trim() ? "all" : view,
-      }),
-    });
+  }, [navigate]);
   const [timeZone] = useState(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
   );
-  const [newMemoDraftId] = useState(getNewMemoDraftId);
-  const capture = useNewMemoCapture({ draftId: newMemoDraftId });
   const desktopSearchRef = useRef<HTMLInputElement>(null);
   const mobileSearchRef = useRef<HTMLInputElement>(null);
   const [isTimelineScrolled, setIsTimelineScrolled] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
-  const isQueueFlushing = useRef(false);
-  const isQueueFlushPending = useRef(false);
-  const isCaptureSubmitting = useRef(false);
-  const restoredDraftNotified = useRef(false);
-  const [isCaptureSubmissionPending, setIsCaptureSubmissionPending] =
-    useState(false);
-  const debouncedQuery = useDebouncedValue(query.trim(), 250);
-  const isSearching = Boolean(debouncedQuery);
+  const [shortcutsOpen, setShowShortcutsOpen] = useState(false);
+  const searchQuery = query.trim();
+  const isSearching = Boolean(searchQuery);
   const [semanticMode, setSemanticMode] = useState(false);
 
   const vectorUsageQuery = useQuery({
@@ -149,10 +161,16 @@ export function FlareMoApp() {
     return typeof limit === "number" && limit > 0;
   }, [vectorUsageQuery.data]);
 
+  const isSemanticSearch =
+    semanticMode && semanticEnabled && isSearching && !dayFilter;
+  const toggleSemantic = useCallback(
+    () => setSemanticMode((value) => !value),
+    [],
+  );
   const semanticResultsQuery = useQuery({
-    queryKey: ["semantic-search", debouncedQuery],
-    enabled: semanticMode && Boolean(debouncedQuery),
-    queryFn: () => semanticSearchMemos(debouncedQuery, 20),
+    queryKey: ["semantic-search", searchQuery],
+    enabled: isSemanticSearch,
+    queryFn: ({ signal }) => semanticSearchMemos(searchQuery, 20, signal),
     retry: false,
   });
   const semanticMemos = useMemo(
@@ -184,13 +202,18 @@ export function FlareMoApp() {
         focusSearch();
         return;
       }
-      // "c" jumps straight into the composer, like Memos' quick capture.
+      // "c" jumps straight into the composer for quick capture.
       if (event.key.toLocaleLowerCase() === "c" && !editable) {
         const composer = document.getElementById("flaremo-composer-input");
         if (composer instanceof HTMLTextAreaElement) {
           event.preventDefault();
           composer.focus();
         }
+      }
+      // "?" lists the available keyboard shortcuts.
+      if (event.key === "?" && !editable) {
+        event.preventDefault();
+        setShowShortcutsOpen(true);
       }
     };
 
@@ -199,18 +222,22 @@ export function FlareMoApp() {
   }, []);
 
   const memosQuery = useInfiniteQuery({
-    queryKey: ["memos", view, debouncedQuery, activeTag, untagged],
+    queryKey: ["memos", view, searchQuery, activeTag, untagged],
     initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam }) =>
-      listMemos({
-        include_deleted: !isSearching && view === "trashed",
-        page_size: PAGE_SIZE,
-        page_token: pageParam,
-        q: debouncedQuery || undefined,
-        state: isSearching ? undefined : viewToMemoState(view),
-        tag: activeTag,
-        untagged,
-      }),
+    enabled: !isSemanticSearch,
+    queryFn: ({ pageParam, signal }) =>
+      listMemos(
+        {
+          include_deleted: !isSearching && view === "trashed",
+          page_size: PAGE_SIZE,
+          page_token: pageParam,
+          q: searchQuery || undefined,
+          state: isSearching ? undefined : viewToMemoState(view),
+          tag: activeTag,
+          untagged,
+        },
+        signal,
+      ),
     getNextPageParam: (lastPage) => lastPage.next_page_token,
     retry: false,
   });
@@ -229,18 +256,19 @@ export function FlareMoApp() {
     () => memosQuery.data?.pages.flatMap((page) => page.memos) ?? [],
     [memosQuery.data],
   );
+  const displayedMemos = isSemanticSearch ? semanticMemos : memos;
   const attachmentsByMemo = useMemo(
     () =>
       new Map(
-        memos.map((memo) => [memo.name, memo.attachments ?? []] as const),
+        displayedMemos.map(
+          (memo) => [memo.name, memo.attachments ?? []] as const,
+        ),
       ),
-    [memos],
+    [displayedMemos],
   );
   const stats = statsQuery.data ?? EMPTY_STATS;
 
   const {
-    createMemoAsync,
-    isCreatingMemo,
     deleteTagMutation,
     handleMutationError,
     hardDeleteMutation,
@@ -258,106 +286,62 @@ export function FlareMoApp() {
     invalidateWorkspace,
   });
 
-  const flushQueuedCaptures = useCallback(async () => {
-    if (!isBrowserOnline()) return;
-    // An "online" event that lands while a flush is running (e.g. the mount
-    // flush) must schedule another pass instead of being swallowed.
-    if (isQueueFlushing.current) {
-      isQueueFlushPending.current = true;
-      return;
-    }
-
-    isQueueFlushing.current = true;
-    try {
-      let submitted = 0;
-      let failed = 0;
-      do {
-        isQueueFlushPending.current = false;
-        const result = await flushQueuedMemoSubmissions(
-          (submission) => createMemoAsync(submission),
-          {
-            shouldContinueAfterFailure:
-              shouldContinueQueuedSubmissionAfterFailure,
-          },
-        );
-        submitted += result.submittedIds.length;
-        failed += result.failedIds.length;
-      } while (isQueueFlushPending.current && isBrowserOnline());
-      if (submitted > 0) {
-        toast.success(t("toast.queueSynced"));
-      }
-      if (failed > 0) {
-        toast.error(t("toast.queueNeedsAttention", { count: failed }));
-      }
-    } finally {
-      isQueueFlushing.current = false;
-    }
-  }, [createMemoAsync, t]);
-
-  useEffect(() => {
-    void flushQueuedCaptures();
-    const handleOnline = () => void flushQueuedCaptures();
-    window.addEventListener("online", handleOnline);
-    return () => window.removeEventListener("online", handleOnline);
-  }, [flushQueuedCaptures]);
-
-  useEffect(() => {
-    if (!capture.didRestoreStoredDraft || restoredDraftNotified.current) return;
-    restoredDraftNotified.current = true;
-    toast.success(t("toast.draftRestored"));
-  }, [capture.didRestoreStoredDraft, t]);
-
-  const handleCaptureSubmit = async (input: MemoCaptureInput) => {
-    if (isCaptureSubmitting.current) return;
-
-    isCaptureSubmitting.current = true;
-    setIsCaptureSubmissionPending(true);
-    const submission = {
-      ...input,
-      content: input.content || t("toast.untitledAttachment"),
-    };
-    try {
-      const validationError = validateMemoCaptureSubmission(submission, t);
-      if (validationError) {
-        handleMutationError(validationError);
-        throw validationError;
-      }
-
-      if (!isBrowserOnline()) {
-        const queued = await enqueueMemoSubmission(submission);
-        if (!queued) {
-          const error = new Error(t("toast.offlineStorageUnavailable"));
-          handleMutationError(error);
-          throw error;
-        }
-        await capture.discardDraft();
-        toast.success(t("toast.queuedForSync"));
-        return;
-      }
-
-      try {
-        await createMemoAsync(submission);
-        await capture.discardDraft();
-        toast.success(t("toast.saved"));
-      } catch (error) {
-        if (!shouldQueueAfterFailure(error)) {
-          handleMutationError(error);
-          throw error;
-        }
-
-        const queued = await enqueueMemoSubmission(submission);
-        if (!queued) {
-          handleMutationError(error);
-          throw error;
-        }
-        await capture.discardDraft();
-        toast.success(t("toast.queuedForSync"));
-      }
-    } finally {
-      isCaptureSubmitting.current = false;
-      setIsCaptureSubmissionPending(false);
-    }
-  };
+  const { mutate: updateMemo, mutateAsync: updateMemoAsync } = updateMutation;
+  const { mutate: trashMemo } = trashMutation;
+  const { mutate: restoreMemo } = restoreMutation;
+  const { mutate: shareMemo } = shareMutation;
+  const { mutateAsync: hardDeleteMemo } = hardDeleteMutation;
+  const handleArchive = useCallback(
+    (id: string) => {
+      const source = displayedMemos.find(
+        (item) => item.name === id || item.id === id,
+      );
+      updateMemo({
+        id,
+        input: { status: source?.state === "archived" ? "normal" : "archived" },
+      });
+    },
+    [displayedMemos, updateMemo],
+  );
+  const handlePin = useCallback(
+    (id: string, pinned: boolean) => updateMemo({ id, input: { pinned } }),
+    [updateMemo],
+  );
+  const handleUpdate = useCallback(
+    async (
+      id: string,
+      input: { content: string; visibility: MemoVisibility },
+    ) => {
+      await updateMemoAsync({ id, input });
+    },
+    [updateMemoAsync],
+  );
+  const handleHardDelete = useCallback(
+    async (id: string) => {
+      await hardDeleteMemo(id);
+    },
+    [hardDeleteMemo],
+  );
+  const { fetchNextPage, refetch, isFetchNextPageError } = memosQuery;
+  const { refetch: refetchSemantic } = semanticResultsQuery;
+  const handleLoadMore = useCallback(() => {
+    void fetchNextPage();
+  }, [fetchNextPage]);
+  const handleRetry = useCallback(() => {
+    if (isSemanticSearch) void refetchSemantic();
+    else if (isFetchNextPageError) void fetchNextPage();
+    else void refetch();
+  }, [
+    isSemanticSearch,
+    isFetchNextPageError,
+    fetchNextPage,
+    refetch,
+    refetchSemantic,
+  ]);
+  const isUpdating = isSemanticSearch
+    ? semanticResultsQuery.isFetching
+    : memosQuery.isFetching && !memosQuery.isFetchingNextPage;
+  const hasFilters = Boolean(query.trim() || activeTag || untagged);
 
   const renderExplorer = (importInputId: string, onNavigate?: () => void) => (
     <FlareMoExplorer
@@ -494,204 +478,200 @@ export function FlareMoApp() {
                   /
                 </span>
                 <div className="truncate px-1.5 py-1 text-sm font-semibold">
-                  {query.trim() ? t("search.results") : viewTitle(view, t)}
+                  {dayFilter
+                    ? formatDayTitle(dayFilter, locale)
+                    : query.trim()
+                      ? t("search.results")
+                      : viewTitle(view, t)}
                 </div>
               </div>
-              <SearchBox
-                className="hidden w-[243px] md:block"
+              <WorkspaceSearch
+                className="hidden w-[280px] min-w-0 shrink md:block"
                 inputRef={desktopSearchRef}
-                onToggleSemantic={
-                  semanticEnabled
-                    ? () => setSemanticMode((value) => !value)
-                    : undefined
-                }
-                query={query}
+                onToggleSemantic={semanticEnabled ? toggleSemantic : undefined}
+                query={dayFilter ? "" : query}
                 semanticMode={semanticMode}
-                setQuery={setQuery}
-                t={t}
+                onQueryChange={setQuery}
+                isPending={isUpdating}
               />
             </div>
           </header>
           <main
             className="mx-auto min-h-0 w-full max-w-[640px] flex-1 overflow-y-auto px-5 pt-1 pb-8 lg:px-3"
-            onScroll={(event) =>
-              setIsTimelineScrolled(event.currentTarget.scrollTop > 4)
-            }
+            onScroll={(event) => {
+              const scrolled = event.currentTarget.scrollTop > 4;
+              setIsTimelineScrolled((prev) =>
+                prev === scrolled ? prev : scrolled,
+              );
+            }}
           >
-            <SearchBox
+            <WorkspaceSearch
               className="mb-3 md:hidden motion-safe:animate-rise"
               inputRef={mobileSearchRef}
-              onToggleSemantic={
-                semanticEnabled
-                  ? () => setSemanticMode((value) => !value)
-                  : undefined
-              }
-              query={query}
+              onToggleSemantic={semanticEnabled ? toggleSemantic : undefined}
+              query={dayFilter ? "" : query}
               semanticMode={semanticMode}
-              setQuery={setQuery}
-              t={t}
+              onQueryChange={setQuery}
+              isPending={isUpdating}
             />
             <div className="flex flex-col gap-3">
-              {view === "all" && (
-                <MemoComposer
-                  draft={capture.draft}
-                  isPending={isCreatingMemo || isCaptureSubmissionPending}
-                  onDraftChange={capture.updateDraft}
-                  onSubmit={handleCaptureSubmit}
-                />
-              )}
-              {(activeTag || query.trim()) && (
+              <WorkspaceComposer
+                visible={view === "all"}
+                composeRequested={composeRequested}
+              />
+              {hasFilters && (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground motion-safe:animate-rise">
-                  {query.trim() && (
-                    <span className="rounded-md bg-muted px-2 py-1">
+                  {query.trim() && !dayFilter && !isSemanticSearch && (
+                    <span className="flex items-center gap-1.5 rounded-md bg-muted px-2 py-1">
                       {t("search.globalScope")}
+                      <InfoTip text={t("search.syntaxHint")} />
+                    </span>
+                  )}
+                  {dayFilter && (
+                    <span className="flex items-center gap-1 rounded-md bg-muted px-2 py-1">
+                      <CalendarIcon
+                        aria-hidden="true"
+                        className="size-3 shrink-0"
+                      />
+                      {formatDayTitle(dayFilter, locale)}
+                      <button
+                        aria-label={t("filter.clearDate")}
+                        className="-mr-1 rounded p-0.5 hover:text-foreground"
+                        type="button"
+                        onClick={() => setQuery("")}
+                      >
+                        <XIcon className="size-3.5" />
+                      </button>
                     </span>
                   )}
                   {activeTag && (
                     <button
-                      className="rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground"
+                      aria-label={t("filter.clearTag", { tag: activeTag })}
+                      className="flex min-h-8 items-center gap-1 rounded-md bg-muted px-2 py-1 motion-safe:transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                       type="button"
                       onClick={() => setActiveTag(undefined)}
                     >
                       #{activeTag}
+                      <XIcon aria-hidden="true" className="size-3.5" />
                     </button>
                   )}
-                  <button
-                    className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
-                    type="button"
-                    onClick={() => {
-                      setActiveTag(undefined);
-                      setQuery("");
-                    }}
-                  >
-                    {t("common.clearFilters")}
-                  </button>
-                </div>
-              )}
-              {query.trim() && !semanticMode && (
-                <div className="-mt-1">
-                  <InfoTip text={t("search.syntaxHint")} />
+                  {untagged && (
+                    <button
+                      className="flex min-h-8 items-center gap-1 rounded-md bg-muted px-2 py-1 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                      aria-label={t("filter.clearUntagged")}
+                      type="button"
+                      onClick={() => setUntagged(false)}
+                    >
+                      {t("explorer.untagged")}
+                      <XIcon aria-hidden="true" className="size-3.5" />
+                    </button>
+                  )}
+                  {hasFilters && (
+                    <button
+                      className="rounded-md px-2 py-1 motion-safe:transition-colors hover:bg-muted hover:text-foreground"
+                      type="button"
+                      onClick={clearFilters}
+                    >
+                      {t("common.clearFilters")}
+                    </button>
+                  )}
                 </div>
               )}
               <MemoList
                 attachmentsByMemo={attachmentsByMemo}
                 emptyDescription={
-                  semanticMode && debouncedQuery
+                  isSemanticSearch
                     ? t("search.semanticEmpty")
-                    : undefined
+                    : hasFilters
+                      ? t("list.filteredEmptyDescription")
+                      : view === "archived"
+                        ? t("list.archiveEmptyDescription")
+                        : view === "trashed"
+                          ? t("list.trashEmptyDescription")
+                          : undefined
                 }
                 hasError={
-                  semanticMode
+                  isSemanticSearch
                     ? semanticResultsQuery.isError
                     : memosQuery.isError
                 }
                 hasNextPage={
-                  semanticMode ? false : Boolean(memosQuery.hasNextPage)
+                  isSemanticSearch ? false : Boolean(memosQuery.hasNextPage)
                 }
                 isFetchingNextPage={
-                  semanticMode ? false : memosQuery.isFetchingNextPage
+                  isSemanticSearch ? false : memosQuery.isFetchingNextPage
                 }
                 isLoading={
-                  semanticMode
+                  isSemanticSearch
                     ? semanticResultsQuery.isLoading
                     : memosQuery.isLoading
                 }
-                memos={semanticMode ? semanticMemos : memos}
-                searchQuery={debouncedQuery || undefined}
+                memos={displayedMemos}
+                searchQuery={searchQuery || undefined}
                 sharesByMemo={sharesByMemo}
-                onArchive={(id) => {
-                  const source = semanticMode ? semanticMemos : memos;
-                  const memo = source.find(
-                    (item) => item.name === id || item.id === id,
-                  );
-                  updateMutation.mutate({
-                    id,
-                    input: {
-                      status:
-                        memo?.state === "archived" ? "normal" : "archived",
-                    },
-                  });
-                }}
-                onHardDelete={async (id) => {
-                  await hardDeleteMutation.mutateAsync(id);
-                }}
-                onLoadMore={() => {
-                  if (!semanticMode) void memosQuery.fetchNextPage();
-                }}
-                onPin={(id, pinned) =>
-                  updateMutation.mutate({ id, input: { pinned } })
-                }
-                onRestore={(id) => restoreMutation.mutate(id)}
-                onRetry={() => {
-                  if (semanticMode) void semanticResultsQuery.refetch();
-                  else void memosQuery.refetch();
-                }}
-                onShare={(id) => shareMutation.mutate(id)}
+                onArchive={handleArchive}
+                onHardDelete={handleHardDelete}
+                onLoadMore={handleLoadMore}
+                onPin={handlePin}
+                onRestore={restoreMemo}
+                onRetry={handleRetry}
+                onShare={shareMemo}
                 onTagClick={setActiveTag}
-                onTrash={(id) => trashMutation.mutate(id)}
-                onUpdate={async (id, input) => {
-                  await updateMutation.mutateAsync({ id, input });
-                }}
+                onTrash={trashMemo}
+                onUpdate={handleUpdate}
+                onClearFilters={hasFilters ? clearFilters : undefined}
+                isUpdating={isUpdating}
+                isPaginationError={!isSemanticSearch && isFetchNextPageError}
+                isRetrying={
+                  isSemanticSearch
+                    ? semanticResultsQuery.isFetching
+                    : memosQuery.isFetching
+                }
+                emptyTitle={
+                  hasFilters
+                    ? t("list.filteredEmptyTitle")
+                    : view === "all"
+                      ? t("list.emptyTitle")
+                      : view === "archived"
+                        ? t("list.archiveEmptyTitle")
+                        : t("list.trashEmptyTitle")
+                }
               />
             </div>
           </main>
         </div>
       </div>
-    </div>
-  );
-}
-
-function SearchBox({
-  className,
-  inputRef,
-  query,
-  semanticMode = false,
-  onToggleSemantic,
-  setQuery,
-  t,
-}: {
-  className: string;
-  inputRef?: RefObject<HTMLInputElement | null>;
-  query: string;
-  semanticMode?: boolean;
-  onToggleSemantic?: () => void;
-  setQuery: (value: string) => void;
-  t: (key: TranslationKey) => string;
-}) {
-  return (
-    <div className={className}>
-      <div className="relative">
-        <SearchIcon className="pointer-events-none absolute top-1/2 left-3 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          aria-label={t("common.search")}
-          className="h-9 rounded-xl border-0 bg-muted pr-11 pl-9 shadow-none transition-[box-shadow,background-color] focus-visible:bg-card focus-visible:ring-2 focus-visible:ring-flame-400/30"
-          placeholder={
-            semanticMode
-              ? t("search.semanticPlaceholder")
-              : t("search.placeholder")
-          }
-          ref={inputRef}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        {onToggleSemantic && (
-          <button
-            aria-label={t("search.semanticToggle")}
-            aria-pressed={semanticMode}
-            className={cn(
-              "absolute top-1/2 right-2 -translate-y-1/2 rounded-md p-1 transition-colors",
-              semanticMode
-                ? "bg-flame-500/15 text-flame-500"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            title={t("search.semanticToggle")}
-            type="button"
-            onClick={onToggleSemantic}
-          >
-            <SparklesIcon className="size-4" />
-          </button>
-        )}
-      </div>
+      <Dialog open={shortcutsOpen} onOpenChange={setShowShortcutsOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("shortcuts.title")}</DialogTitle>
+            <DialogDescription>{t("shortcuts.subtitle")}</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col divide-y divide-border/60">
+            {(
+              [
+                ["shortcuts.search", "⌘K / /"],
+                ["shortcuts.composer", "C"],
+                ["shortcuts.send", "Enter"],
+                ["shortcuts.linebreak", "Shift + Enter"],
+                ["shortcuts.saveEdit", "⌘Enter"],
+              ] as const
+            ).map(([key, combo]) => (
+              <div
+                className="flex items-center justify-between gap-3 py-2 text-sm"
+                key={key}
+              >
+                <span className="text-muted-foreground">
+                  {t(key as TranslationKey)}
+                </span>
+                <kbd className="rounded-md border bg-muted px-2 py-0.5 font-mono text-xs">
+                  {combo}
+                </kbd>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -708,5 +688,10 @@ function viewTitle(view: ViewMode, t: (key: TranslationKey) => string) {
 }
 
 export default function App() {
-  return <AppRoutes />;
+  return (
+    <>
+      <PwaUpdatePrompt />
+      <AppRoutes />
+    </>
+  );
 }

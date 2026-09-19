@@ -18,6 +18,12 @@ export type MemoCaptureInput = {
   tags: string[];
   files: File[];
   /**
+   * Attachments uploaded before their memo existed (inline image paste).
+   * `createMemoWithAttachments` binds them to the fresh memo right after
+   * creation; the list must survive queue persistence so a replay re-binds.
+   */
+  preuploadedAttachmentNames?: string[];
+  /**
    * A client-generated id sent as `payload.client_id`. Keep it when an item is
    * retried so a future idempotent create endpoint can recognize the replay.
    */
@@ -153,6 +159,9 @@ export function createMemoCaptureInput(
     visibility: input.visibility,
     tags: normalizeTags(input.tags),
     files: [...input.files],
+    ...(input.preuploadedAttachmentNames
+      ? { preuploadedAttachmentNames: [...input.preuploadedAttachmentNames] }
+      : {}),
     clientId: input.clientId ?? createMemoCaptureClientId(),
   };
 }
@@ -304,6 +313,11 @@ function toPersistedCapture(input: MemoCaptureInput): PersistedMemoCapture {
     content: capture.content,
     visibility: capture.visibility,
     tags: capture.tags,
+    ...(capture.preuploadedAttachmentNames
+      ? {
+          preuploadedAttachmentNames: [...capture.preuploadedAttachmentNames],
+        }
+      : {}),
     clientId: capture.clientId ?? createMemoCaptureClientId(),
     attachments: capture.files.map((file) => ({
       filename: file.name,
@@ -346,6 +360,9 @@ function fromPersistedCapture(record: PersistedMemoCapture): MemoCaptureInput {
     visibility: record.visibility,
     tags: [...record.tags],
     files: record.attachments.map(toFile),
+    ...(record.preuploadedAttachmentNames
+      ? { preuploadedAttachmentNames: [...record.preuploadedAttachmentNames] }
+      : {}),
     clientId: record.clientId,
   };
 }

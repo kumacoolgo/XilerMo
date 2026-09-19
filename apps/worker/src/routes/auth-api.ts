@@ -41,17 +41,17 @@ export const authApi = new Hono<HonoBindings>();
 const bootstrapSchema = z.object({
   name: z.string().trim().min(1).max(80),
   email: z.string().trim().email().max(320),
-  password: z.string().min(12).max(128),
+  password: z.string().min(8).max(128),
 });
 
 const operatorRecoverySchema = z.object({
-  new_password: z.string().min(12).max(128),
+  new_password: z.string().min(8).max(128),
 });
 
 const registerSchema = z.object({
   name: z.string().trim().min(1).max(80),
   email: z.string().trim().email().max(320),
-  password: z.string().min(12).max(128),
+  password: z.string().min(8).max(128),
 });
 
 authApi.get("/bootstrap/status", async (c) => {

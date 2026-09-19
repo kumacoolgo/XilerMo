@@ -64,6 +64,147 @@ describe("FlareMo Worker API", () => {
     await mf.dispose();
   });
 
+  it("protects capture capability and WebSocket with browser auth and exact Origin", async () => {
+    const base = "http://flaremo.test/api/app/capture";
+    const raw = (path: string, headers: Record<string, string> = {}) =>
+      app.fetch(new Request(base + path, { headers }), env);
+    const rateLimitKeys: string[] = [];
+    Object.assign(env, {
+      RATE_LIMITER: {
+        limit: async (input: { key: string }) => {
+          rateLimitKeys.push(input.key);
+          return { success: false };
+        },
+      },
+    });
+    expect((await raw("/status")).status).toBe(401);
+    expect(
+      (
+        await raw("/ws", {
+          origin: "http://flaremo.test",
+          upgrade: "websocket",
+        })
+      ).status,
+    ).toBe(401);
+    const authenticated = { cookie: sessionCookie };
+    const unavailable = await raw("/status", authenticated);
+    expect(await unavailable.json()).toEqual({
+      available: false,
+      provider: null,
+      streaming: false,
+    });
+    expect(
+      (
+        await raw("/ws", {
+          ...authenticated,
+          origin: "http://flaremo.test",
+          upgrade: "websocket",
+        })
+      ).status,
+    ).toBe(503);
+    Object.assign(env, {
+      FLAREMO_ASR_DASHSCOPE_API_KEY: "test-only-asr-secret",
+    });
+    const available = await raw("/status", authenticated);
+    expect(available.headers.get("cache-control")).toBe("no-store");
+    const body = await available.text();
+    expect(JSON.parse(body)).toEqual({
+      available: true,
+      provider: "dashscope",
+      streaming: true,
+    });
+    expect(body).not.toContain("test-only-asr-secret");
+    for (const origin of [
+      "https://evil.test",
+      "http://flaremo.test.evil.test",
+      "null",
+      "",
+    ]) {
+      expect(
+        (await raw("/ws", { ...authenticated, origin, upgrade: "websocket" }))
+          .status,
+      ).toBe(403);
+    }
+    expect(
+      (await raw("/ws", { ...authenticated, origin: "http://flaremo.test" }))
+        .status,
+    ).toBe(426);
+    expect(rateLimitKeys).toEqual([]);
+    expect(
+      (
+        await raw("/ws", {
+          ...authenticated,
+          origin: "http://flaremo.test",
+          upgrade: "websocket",
+          "cf-connecting-ip": "203.0.113.8",
+        })
+      ).status,
+    ).toBe(429);
+    expect(rateLimitKeys).toHaveLength(1);
+    expect(rateLimitKeys[0]).toMatch(/^capture:[^:]+$/);
+    expect(rateLimitKeys[0]).not.toContain("203.0.113.8");
+    expect(
+      (
+        await raw("/status", {
+          ...authenticated,
+          authorization: "Bearer memos_pat_test",
+        })
+      ).status,
+    ).toBe(401);
+    expect(rateLimitKeys).toHaveLength(1);
+  });
+
+  it("exposes Tencent capability only when complete, with the same browser and Origin guards", async () => {
+    Object.assign(env, {
+      FLAREMO_ASR_PROVIDER: "tencent",
+      FLAREMO_ASR_TENCENT_SECRET_ID: "test-tencent-secret-id",
+      FLAREMO_ASR_TENCENT_SECRET_KEY: "test-tencent-secret-key",
+    });
+    const base = "http://flaremo.test/api/app/capture";
+    const raw = (path: string, headers: Record<string, string> = {}) =>
+      app.fetch(new Request(base + path, { headers }), env);
+    const headers = { cookie: sessionCookie, origin: "http://flaremo.test" };
+    expect(await (await raw("/status", headers)).json()).toEqual({
+      available: false,
+      provider: null,
+      streaming: false,
+    });
+    expect(
+      (await raw("/ws", { ...headers, upgrade: "websocket" })).status,
+    ).toBe(503);
+    Object.assign(env, { FLAREMO_ASR_TENCENT_APP_ID: "1234567890" });
+    const response = await raw("/status", headers);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      available: true,
+      provider: "tencent",
+      streaming: true,
+    });
+    expect((await raw("/status")).status).toBe(401);
+    expect(
+      (
+        await raw("/status", {
+          ...headers,
+          authorization: "Bearer memos_pat_test",
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (await raw("/ws", { origin: headers.origin, upgrade: "websocket" }))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await raw("/ws", {
+          ...headers,
+          origin: "https://evil.test",
+          upgrade: "websocket",
+        })
+      ).status,
+    ).toBe(403);
+    expect((await raw("/ws", headers)).status).toBe(426);
+  });
+
   it("supports memo CRUD, tag filtering, trash, OpenAPI, and MCP", async () => {
     const created = await json(
       await fetchApp("http://flaremo.test/api/v1/memos", {
@@ -237,6 +378,18 @@ describe("FlareMo Worker API", () => {
         )
       ).memos.map((memo) => memo.name),
     ).toEqual([normal.name]);
+  });
+
+  it("finds a substring inside continuous Chinese capture text", async () => {
+    const created = await createMemo<{ name: string }>(
+      "这是一次语音记录准确性测试，今天讨论高性能数据安全和知识检索。",
+    );
+    const result = await json<ListMemosResponse>(
+      await fetchApp(
+        `http://flaremo.test/api/app/memos?q=${encodeURIComponent("高性能数据安全")}`,
+      ),
+    );
+    expect(result.memos.map((memo) => memo.name)).toContain(created.name);
   });
 
   it("initializes the single owner idempotently under concurrent requests", async () => {
@@ -1193,12 +1346,70 @@ describe("FlareMo Worker API", () => {
     );
     await app.scheduled(
       {
-        scheduledTime: Date.now() + 2 * 24 * 60 * 60 * 1_000,
+        // Past the 7-day unbound-orphan grace period, so the created orphan
+        // is inside the GC window.
+        scheduledTime: Date.now() + 9 * 24 * 60 * 60 * 1_000,
       } as ScheduledController,
       env,
     );
     expect(
       await fetchApp(`http://flaremo.test/api/v1/${orphan.name}`),
+    ).toMatchObject({ status: 404 });
+  });
+
+  it("recovers a raw memo-row delete through the attachment GC", async () => {
+    const memo = await createMemo("rogue hard delete");
+    const attachment = await uploadAttachment(memo.name);
+    // A hard-delete path that skips the marker entirely: drop the memo row
+    // directly so attachment rows keep no `deleting` state — only the
+    // unbound-orphan clause can still reclaim the binary. (Production D1
+    // nulls attachment.memo_id via the FK cascade; Miniflare does not, so
+    // mimic that step explicitly.)
+    await env.DB.prepare(
+      "UPDATE attachments SET memo_id = NULL WHERE memo_id = ?",
+    )
+      .bind(memo.name)
+      .run();
+    await env.DB.prepare("DELETE FROM memos WHERE id = ?")
+      .bind(memo.name)
+      .run();
+    await app.scheduled(
+      {
+        scheduledTime: Date.now() + 9 * 24 * 60 * 60 * 1_000,
+      } as ScheduledController,
+      env,
+    );
+    expect(
+      await fetchApp(`http://flaremo.test/api/v1/${attachment.name}`),
+    ).toMatchObject({ status: 404 });
+  });
+
+  it("purges recycle-bin memos past the trash retention window", async () => {
+    const memo = await createMemo("expired trash");
+    const attachment = await uploadAttachment(memo.name);
+    await json(
+      await fetchApp(`http://flaremo.test/api/app/memos/${memo.id}`, {
+        method: "DELETE",
+      }),
+    );
+    // Backdate deletedAt beyond the default 30-day retention. Raw D1 here:
+    // drizzle updates without a consuming clause don't always flush in the
+    // Miniflare test harness.
+    await env.DB.prepare("UPDATE memos SET deleted_at = ? WHERE id = ?")
+      .bind(
+        new Date(Date.now() - 45 * 24 * 60 * 60 * 1_000).toISOString(),
+        memo.name,
+      )
+      .run();
+    await app.scheduled(
+      { scheduledTime: Date.now() } as ScheduledController,
+      env,
+    );
+    expect(
+      await fetchApp(`http://flaremo.test/api/app/memos/${memo.id}`),
+    ).toMatchObject({ status: 404 });
+    expect(
+      await fetchApp(`http://flaremo.test/api/v1/${attachment.name}`),
     ).toMatchObject({ status: 404 });
   });
 
@@ -2842,6 +3053,11 @@ describe("FlareMo Worker API", () => {
         .run();
     await seedLegacyMemo("memos/legacy-team", "protected");
     await seedLegacyMemo("memos/legacy-public", "public");
+    await database
+      .prepare(
+        "INSERT INTO attachments (id, user_id, memo_id, r2_key, filename, created_at, updated_at) VALUES ('attachments/legacy', 'users/owner', 'memos/legacy-team', 'legacy/object', 'legacy.txt', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+      )
+      .run();
 
     await applyFlaremoMigrations(database, { fromTag: "0014_" });
     sessionCookie = await bootstrapAndSignIn();
@@ -2869,6 +3085,34 @@ describe("FlareMo Worker API", () => {
       visibility: "private",
       content: "legacy protected memo",
     });
+
+    expect(
+      await database
+        .prepare("SELECT status FROM users WHERE id = 'users/owner'")
+        .first<{ status: string }>(),
+    ).toEqual({ status: "active" });
+    expect(
+      await database
+        .prepare(
+          "SELECT memo_id, r2_key, filename FROM attachments WHERE id = 'attachments/legacy'",
+        )
+        .first<{ filename: string; memo_id: string; r2_key: string }>(),
+    ).toEqual({
+      filename: "legacy.txt",
+      memo_id: "memos/legacy-team",
+      r2_key: "legacy/object",
+    });
+    const upgradeObjects = await database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE name IN ('member_removal_jobs', 'users_role_status_idx', 'memos_user_created_id_idx', 'attachments_cleanup_idx') ORDER BY name",
+      )
+      .all<{ name: string }>();
+    expect(upgradeObjects.results.map((row) => row.name)).toEqual([
+      "attachments_cleanup_idx",
+      "member_removal_jobs",
+      "memos_user_created_id_idx",
+      "users_role_status_idx",
+    ]);
   });
 
   it("rejects public registration while the deployment default keeps it closed", async () => {
@@ -2976,6 +3220,69 @@ describe("FlareMo Worker API", () => {
       [authorPrivateId, authorTeamId].sort(),
     );
   });
+
+  it("exposes context attachments newest first and stores uploaded duration", async () => {
+    const memo = await createMemo<{ id: string; name: string }>(
+      "attachment ordering",
+    );
+
+    const formDataOld = new FormData();
+    formDataOld.set("memo", memo.name);
+    formDataOld.set(
+      "file",
+      new File(["old"], "old.txt", { type: "text/plain" }),
+    );
+    const first = await json<{ name: string }>(
+      await fetchApp("http://flaremo.test/api/v1/attachments", {
+        method: "POST",
+        body: formDataOld,
+      }),
+    );
+
+    const formDataNew = new FormData();
+    formDataNew.set("memo", memo.name);
+    formDataNew.set(
+      "file",
+      new File(["RIFF----WAVE"], "clip.wav", { type: "audio/wav" }),
+    );
+    formDataNew.set("duration", "3");
+    const second = await json<{
+      name: string;
+      payload: Record<string, unknown>;
+    }>(
+      await fetchApp("http://flaremo.test/api/v1/attachments", {
+        method: "POST",
+        body: formDataNew,
+      }),
+    );
+    expect(second.payload).toEqual({ duration: 3 });
+
+    // A malformed duration is decoration: ignore it, never fail the upload.
+    const formDataBad = new FormData();
+    formDataBad.set("memo", memo.name);
+    formDataBad.set(
+      "file",
+      new File(["x"], "broken.wav", { type: "audio/wav" }),
+    );
+    formDataBad.set("duration", "abc");
+    const third = await json<{ payload: Record<string, unknown> }>(
+      await fetchApp("http://flaremo.test/api/v1/attachments", {
+        method: "POST",
+        body: formDataBad,
+      }),
+    );
+    expect(third.payload).toEqual({});
+
+    // The list endpoints order newest first; the reading view must agree.
+    const context = await json<{ attachments: Array<{ name: string }> }>(
+      await fetchApp(`http://flaremo.test/api/app/memos/${memo.id}`),
+    );
+    expect(context.attachments.map((attachment) => attachment.name)).toEqual([
+      third.name ?? "attachments/missing",
+      second.name,
+      first.name,
+    ]);
+  });
 });
 
 function fetchApp(
@@ -3063,6 +3370,23 @@ async function createMemo<T = Record<string, unknown>>(content: string) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ content }),
+    }),
+  );
+}
+
+async function uploadAttachment<T = Record<string, unknown>>(memoName: string) {
+  const formData = new FormData();
+  formData.set("memo", memoName);
+  formData.set(
+    "file",
+    new File(["payload"], "file.txt", {
+      type: "text/plain",
+    }),
+  );
+  return json<T>(
+    await fetchApp("http://flaremo.test/api/v1/attachments", {
+      method: "POST",
+      body: formData,
     }),
   );
 }
